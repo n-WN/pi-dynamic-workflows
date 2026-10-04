@@ -55,6 +55,8 @@ export interface AttemptHooks {
 export interface AttemptHandle {
 	promise: Promise<AttemptOutcome>;
 	abort(reason: AbortReason): void;
+	/** Send a message to the running agent. Resolves false when it cannot take one now. */
+	steer?(text: string, by: "human" | "agent"): Promise<boolean>;
 }
 
 /** What one agent call resolves to before it runs. */
@@ -368,6 +370,20 @@ export class WorkflowRun {
 		live.handle.abort("restart");
 		this.log("info", `Restarting agent #${id} (${rec.label}).`);
 		return true;
+	}
+
+	/** Send a correction or extra instruction to a running agent. */
+	async steerAgent(id: number, text: string, by: "human" | "agent" = "human"): Promise<boolean> {
+		const rec = this.agents[id];
+		const live = this.attempts.get(id);
+		if (!rec || !live?.handle.steer || !text.trim()) return false;
+		const ok = await live.handle.steer(text.trim(), by);
+		if (ok) {
+			rec.steers = [...(rec.steers ?? []), { t: Date.now(), by, text: text.trim() }];
+			this.log("info", `Message to agent #${id} (${rec.label}) from the ${by === "human" ? "user" : "main agent"}: ${text.trim().slice(0, 200)}`);
+			this.emitChange();
+		}
+		return ok;
 	}
 
 	answerQuestion(qid: number, answer: string | null, by: QuestionRecord["answeredBy"] = "human"): boolean {

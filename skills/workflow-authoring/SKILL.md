@@ -262,5 +262,6 @@ if (go !== "yes") return { plan, applied: false }
 
 The human watches runs in `/workflows` (also `alt+w`): runs → phases → agents → one
 agent's prompt, tool calls, output, and result. They can pause, stop a run or one agent,
-restart an agent, answer questions, and save the script as a `/command`. The main agent
-can use `workflow_control` (`list`, `status`, `wait`, `stop`, `pause`, `resume`, `answer`).
+restart an agent, send a message to a running agent, answer questions, and save the script
+as a `/command`. The main agent can use `workflow_control` (`list`, `status`, `wait`, `stop`,
+`pause`, `resume`, `answer`, `steer`).

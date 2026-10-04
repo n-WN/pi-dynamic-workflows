@@ -37,7 +37,8 @@ type Mode =
 	| { kind: "normal" }
 	| { kind: "save"; runId: string; input: Input; scope: "project" | "personal"; error?: string }
 	| { kind: "answer"; target: Interaction; sel: number; input?: Input }
-	| { kind: "confirm-stop"; runId: string };
+	| { kind: "confirm-stop"; runId: string }
+	| { kind: "steer"; runId: string; agentId: number; input: Input };
 
 export interface MonitorActions {
 	sessionId(): string;
@@ -208,6 +209,7 @@ export class WorkflowMonitor implements Component {
 
 	handleInput(data: string): void {
 		if (this.mode.kind === "save") return this.handleSaveInput(data, this.mode);
+		if (this.mode.kind === "steer") return this.handleSteerInput(data, this.mode);
 		if (this.mode.kind === "answer") return this.handleAnswerInput(data, this.mode);
 		if (this.mode.kind === "confirm-stop") {
 			const run = this.findRun(this.mode.runId);
@@ -344,6 +346,9 @@ export class WorkflowMonitor implements Component {
 		} else if (data === "r") {
 			if (isLive(run) && run.restartAgent(agent.id)) this.setFlash(`Restarting agent #${agent.id} (${agent.label}).`);
 			else this.setFlash("Only a running agent can restart.");
+		} else if (data === "m") {
+			if (isLive(run) && AGENT_ACTIVE.has(agent.status)) this.mode = { kind: "steer", runId: run.id, agentId: agent.id, input: new Input() };
+			else this.setFlash("Only a running agent can get a message.");
 		} else if (data === "p" || data === "s") {
 			this.runAction(data, run);
 		}
@@ -420,6 +425,25 @@ export class WorkflowMonitor implements Component {
 		else if (/^[1-9]$/.test(data) && options[Number(data) - 1] !== undefined) this.finishAnswer(it, options[Number(data) - 1], false);
 		else if (data === "y" && it.kind === "dialog" && it.req.kind === "confirm") this.finishAnswer(it, "Yes", false);
 		else if (data === "n" && it.kind === "dialog" && it.req.kind === "confirm") this.finishAnswer(it, "No", false);
+		this.tui.requestRender();
+	}
+
+	private handleSteerInput(data: string, mode: Extract<Mode, { kind: "steer" }>): void {
+		if (matchesKey(data, "escape")) {
+			this.mode = { kind: "normal" };
+		} else if (matchesKey(data, "enter")) {
+			const text = mode.input.getValue().trim();
+			const run = this.findRun(mode.runId);
+			this.mode = { kind: "normal" };
+			if (text && run && isLive(run)) {
+				void run.steerAgent(mode.agentId, text, "human").then((ok) => {
+					this.setFlash(ok ? `Sent to agent #${mode.agentId}. It reads the message after its current step.` : `Agent #${mode.agentId} cannot take a message now.`, ok ? "info" : "warning");
+					this.tui.requestRender();
+				});
+			}
+		} else {
+			mode.input.handleInput(data);
+		}
 		this.tui.requestRender();
 	}
 
@@ -513,6 +537,11 @@ export class WorkflowMonitor implements Component {
 					["y", "stop the run"],
 					["any key", "cancel"],
 				]);
+			case "steer":
+				return hints(th, [
+					["enter", "send"],
+					["esc", "cancel"],
+				]);
 			default:
 				return "";
 		}
@@ -524,6 +553,16 @@ export class WorkflowMonitor implements Component {
 		if (m.kind === "confirm-stop") {
 			const run = this.findRun(m.runId);
 			return ["", th.fg("warning", `Stop the run ${run?.name ?? m.runId}? Running agents stop; completed results stay saved for a relaunch. (y/n)`)];
+		}
+		if (m.kind === "steer") {
+			m.input.focused = this.focused;
+			const agent = this.findRun(m.runId)?.agents[m.agentId];
+			return [
+				"",
+				section(th, `Message to agent #${m.agentId}${agent ? ` (${agent.label})` : ""}`),
+				m.input.render(inner)[0] ?? "",
+				th.fg("dim", "The agent reads it after its current step and continues with it. Use it to correct or focus the agent."),
+			];
 		}
 		if (m.kind === "save") {
 			m.input.focused = this.focused;
@@ -605,7 +644,7 @@ export class WorkflowMonitor implements Component {
 					title: `Workflows › ${run.name} › ${v.phase}`,
 					right: th.fg("muted", `${c.done + c.cached + c.failed + c.stopped + c.skipped}/${c.total} · filter: ${v.filter}`),
 					lines: this.phaseLines(run, v, inner, height, now),
-					footer: hints(th, [["↑↓", "select"], ["enter", "detail"], ["f", "filter"], ["x", "stop agent"], ["r", "restart"], ...nav, ["esc", "back"]]),
+					footer: hints(th, [["↑↓", "select"], ["enter", "detail"], ["f", "filter"], ["m", "message"], ["x", "stop"], ["r", "restart"], ...nav, ["esc", "back"]]),
 				};
 			}
 			case "agent": {
@@ -617,7 +656,7 @@ export class WorkflowMonitor implements Component {
 					title: `${run.name} › ${agent.phase} › #${agent.id} ${agent.label}`,
 					right: status,
 					lines: this.agentLines(run, agent, v, inner, height, now),
-					footer: hints(th, [["↑↓", "scroll"], ["enter", v.expanded ? "collapse" : "expand"], ["x", "stop"], ["r", "restart"], ...nav, ["esc", "back"]]),
+					footer: hints(th, [["↑↓", "scroll"], ["enter", v.expanded ? "collapse" : "expand"], ["m", "message"], ["x", "stop"], ["r", "restart"], ...nav, ["esc", "back"]]),
 				};
 			}
 			case "script": {
@@ -883,6 +922,11 @@ export class WorkflowMonitor implements Component {
 		const shownPrompt = v.expanded ? promptLines : promptLines.slice(0, 6);
 		for (const l of shownPrompt) all.push(l);
 		if (!v.expanded && promptLines.length > 6) all.push(th.fg("dim", `… ${promptLines.length - 6} more lines (enter expands)`));
+		if (a.steers?.length) {
+			all.push("");
+			all.push(section(th, "Messages sent to this agent"));
+			for (const st of a.steers) for (const l of wrapTextWithAnsi(`${st.by === "human" ? "you" : "main agent"}: ${st.text}`, inner)) all.push(th.fg("accent", l));
+		}
 		all.push("");
 		all.push(section(th, `Tool calls (${a.toolCallCount})`));
 		if (a.toolCalls.length === 0) all.push(th.fg("dim", "none yet"));

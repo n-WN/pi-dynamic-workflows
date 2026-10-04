@@ -412,7 +412,22 @@ export class PiAgentExecutor implements AgentExecutor {
 			}
 		})();
 
-		return { promise, abort: (reason) => abort(reason) };
+		const steer = async (text: string, by: "human" | "agent"): Promise<boolean> => {
+			if (!session || abortReason) return false;
+			try {
+				const who = by === "human" ? "the user who watches this workflow run" : "the main agent that started this workflow";
+				const note = `Message from ${who}. Take it into account for the rest of your task:\n${text}`;
+				if (session.isStreaming) {
+					await session.steer(note, undefined, { source: "extension" });
+				} else {
+					await session.followUp(note, undefined, { source: "extension" });
+				}
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		return { promise, abort: (reason) => abort(reason), steer };
 	}
 }
 

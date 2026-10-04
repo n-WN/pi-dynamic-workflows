@@ -6,7 +6,7 @@
  * conversation. See README.md and DESIGN.md.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -38,7 +38,7 @@ import { resultDetails, resultText, statusText } from "./results.ts";
 import type { WorkflowRun } from "./run.ts";
 import { acceptsString, validate } from "./schema.ts";
 import { renameScript } from "./script.ts";
-import { discoverWorkflows, findWorkflow, personalWorkflowDir, projectSaveDir, type SavedWorkflow, saveWorkflowFile } from "./store.ts";
+import { discoverWorkflows, findWorkflow, personalWorkflowDir, projectSaveDir, runsRoot, type SavedWorkflow, saveWorkflowFile } from "./store.ts";
 import type { RunSnapshot } from "./types.ts";
 import { KeywordEditor, keywordRegex } from "./ui/editor.ts";
 import { WorkflowMonitor } from "./ui/monitor.ts";
@@ -287,13 +287,14 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Inspect, wait for, answer, pause, or stop dynamic workflow runs",
 		parameters: Type.Object({
 			action: Type.Union(
-				["list", "status", "wait", "stop", "pause", "resume", "answer"].map((a) => Type.Literal(a)),
+				["list", "status", "wait", "stop", "pause", "resume", "answer", "steer"].map((a) => Type.Literal(a)),
 				{ description: "What to do." },
 			),
 			runId: Type.Optional(Type.String({ description: "Run ID, such as wf-k3x9ab." })),
 			agent: Type.Optional(Type.Number({ description: "Agent number (#n) for stop." })),
 			question: Type.Optional(Type.Number({ description: "Question number for answer." })),
 			answer: Type.Optional(Type.String({ description: "Answer text for answer." })),
+			message: Type.Optional(Type.String({ description: "For steer: a message to a running agent (correction or extra instruction)." })),
 			timeout: Type.Optional(Type.Number({ description: "For wait: give up after this many seconds (default 600)." })),
 		}),
 		renderCall: (args, theme) => {
@@ -386,6 +387,14 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 					return r.answerQuestion(params.question, params.answer, "agent")
 						? text(`Answered question ${params.question} of ${r.id}.`)
 						: text(`Question ${params.question} of ${r.id} does not wait for an answer.`, true);
+				}
+				case "steer": {
+					const r = pick();
+					if (typeof r === "string") return text(r, true);
+					if (params.agent === undefined || !params.message?.trim()) return text("Pass agent (number) and message (text).", true);
+					return (await r.steerAgent(params.agent, params.message, "agent"))
+						? text(`Sent the message to agent #${params.agent} of ${r.id}. It reads it after its current step.`)
+						: text(`Agent #${params.agent} of ${r.id} is not running, so it cannot take a message.`, true);
 				}
 				default:
 					return text(`Unknown action ${String(params.action)}.`, true);
@@ -667,9 +676,28 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 	// Events
 	// ---------------------------------------------------------------------------
 
-	pi.on("resources_discover", () => ({ skillPaths: [SKILLS_DIR] }));
+	pi.on("resources_discover", () => (passive ? undefined : { skillPaths: [SKILLS_DIR] }));
+
+	// A workflow agent session (its file is under the runs directory) must stay passive:
+	// it must never bind as the registry host or stop runs. Agents normally do not load
+	// this extension at all; this guard covers path mismatches such as symlinks.
+	let passive = false;
+	const isAgentSession = (ctx: ExtensionContext): boolean => {
+		try {
+			const file = ctx.sessionManager.getSessionFile() ?? "";
+			const root = runsRoot(agentDir);
+			return !!file && (file.startsWith(root) || file.startsWith(realpathOr(root)));
+		} catch {
+			return false;
+		}
+	};
 
 	pi.on("session_start", async (event, ctx) => {
+		passive = isAgentSession(ctx);
+		if (passive) {
+			pi.setActiveTools(pi.getActiveTools().filter((t) => t !== WORKFLOW_TOOL && t !== CONTROL_TOOL));
+			return;
+		}
 		ctxRef = ctx;
 		sessionId = ctx.sessionManager.getSessionId();
 		cfg = loadConfig(pi.getSettings() as unknown as Record<string, unknown>, agentDir);
@@ -718,6 +746,7 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 	};
 
 	pi.on("session_shutdown", async (event) => {
+		if (passive) return;
 		if (event.reason === "reload") return; // Runs go on; the new copy of the extension adopts them.
 		stopSessionRuns(event.reason === "quit" ? "Stopped: pi exited." : "Stopped: the session changed.");
 		if (reg.host === host) reg.host = undefined;
@@ -732,11 +761,11 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 		);
 		return ok ? undefined : { cancel: true };
 	};
-	pi.on("session_before_switch", async (_e, ctx) => confirmLeave(ctx));
-	pi.on("session_before_fork", async (_e, ctx) => confirmLeave(ctx));
+	pi.on("session_before_switch", async (_e, ctx) => (passive ? undefined : confirmLeave(ctx)));
+	pi.on("session_before_fork", async (_e, ctx) => (passive ? undefined : confirmLeave(ctx)));
 
 	pi.on("input", async (event, ctx) => {
-		if (!cfg.enabled || !cfg.keywordTrigger) return { action: "continue" };
+		if (passive || !cfg.enabled || !cfg.keywordTrigger) return { action: "continue" };
 		const human = (ctx.mode === "tui" && event.source === "interactive") || (ctx.mode === "rpc" && event.source === "rpc");
 		const has = keywordRegex(cfg.keyword).test(event.text);
 		if (!has) {
@@ -756,7 +785,7 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("before_agent_start", async (event) => {
-		if (!cfg.enabled) return undefined;
+		if (passive || !cfg.enabled) return undefined;
 		const sections = event.systemPromptOptions.sections;
 		if (pi.getActiveTools().includes(WORKFLOW_TOOL)) {
 			sections.workflows = workflowsSection(cfg, saved.filter((w) => !w.error));
@@ -775,7 +804,7 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 	// Print and JSON mode: pi exits when the agent settles, so wait for the runs here
 	// and hand their results to the agent before it settles.
 	pi.on("agent_before_settle", async (_event, ctx) => {
-		if (ctx.mode === "tui" || ctx.mode === "rpc") return undefined;
+		if (passive || ctx.mode === "tui" || ctx.mode === "rpc") return undefined;
 		const mine = () => runsOfSession(sessionId).filter((r) => !r.foreground && !r.delivered);
 		const pending = mine();
 		if (!pending.length) return undefined;
@@ -812,6 +841,14 @@ function printProgress(runs: WorkflowRun[]): void {
 		})
 		.join(" | ");
 	process.stderr.write(`\r\x1b[2K[workflow] ${oneLine(text, (process.stderr.columns ?? 100) - 12)}`);
+}
+
+function realpathOr(p: string): string {
+	try {
+		return realpathSync(p);
+	} catch {
+		return p;
+	}
 }
 
 function shortPath(p: string): string {

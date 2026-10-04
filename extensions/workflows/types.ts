@@ -128,6 +128,8 @@ export interface AgentRecord {
 	worktree?: WorktreeInfo;
 	/** Restored from a previous run instead of running again. */
 	fromRunId?: string;
+	/** Messages that the human or the main agent sent to this agent while it ran. */
+	steers?: Array<{ t: number; by: "human" | "agent"; text: string }>;
 	/** How many agent results the script had received when it made this call (replay dependencies). */
 	callAfter?: number;
 	/** Position of this agent in the order in which results reached the script. */

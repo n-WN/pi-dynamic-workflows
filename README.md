@@ -78,6 +78,7 @@ runs  →  run (phases, log)  →  phase (agents)  →  agent (prompt, tool call
 | `p` | Pause or resume the run (running agents finish; no new agents start) |
 | `x` | Stop the selected agent (the script gets `null`), or the run |
 | `r` | Restart the selected running agent |
+| `m` | Send a message to the selected running agent (a correction or an extra instruction; it reads it after its current step) |
 | `f` | Filter the agents of a phase: all, active, failed, done, queued |
 | `s` | Save the run's script as a command (project `.pi/workflows/` or personal `~/.pi/agent/workflows/`) |
 | `v` | Show the run's script |
@@ -99,7 +100,8 @@ with the result.
 The `workflow` tool takes `script` (inline), `scriptPath`, or `name` (saved), plus
 `args`, `resumeFromRunId`, and `wait`. It returns at once with a run ID. The
 result arrives later as a `<workflow-result>` message. `workflow_control` lists,
-inspects, waits for, pauses, stops, and answers runs.
+inspects, waits for, pauses, stops, answers, and steers runs (`steer` sends a
+message to one running agent).
 
 The script API in short (the full reference is the `workflow-authoring` skill):
 

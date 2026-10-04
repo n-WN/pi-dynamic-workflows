@@ -140,6 +140,7 @@ back to the prefix rule. `ask()` answers are replayed by position and text.
 | Typing | The keyword is highlighted while you type; the editor border says what it does and how to dismiss it (`alt+w`). In the transcript the keyword shows as **⚡ultracode**, and a badge confirms the opt-in. |
 | Before a run | Approval overlay: name, description, planned phases, size limits, model, args, resume source. Choices: run, run and stop asking (named workflows), run and approve the session, read the script, edit it (`ctrl+g`), decline with a note for the agent (`tab`), decline. |
 | During a run | One task line per run below the editor: spinner, current phase with its count, colored progress bar (done, failed, running, queued), counters, tokens, time. It turns into a warning when the run waits for you, is paused, is large, or the script is busy. The tool row in the transcript also redraws live. |
+| Steering | `m` on a running agent sends it a message (pi steering: the agent reads it after its current step). The agent detail lists the messages. |
 | Inspecting | `/workflows` overlay with four levels and a script view. Keys follow Claude Code where possible (`p`, `x`, `r`, `s`, `f`, `j`/`k`). Every level shows its own key hints. Long text wraps; long paths shorten in the middle. |
 | Questions | `ask()` questions and agent permission prompts show in the task line, as a notification, and as a banner in the monitor. `a` answers inline: options with numbers, or a text field. |
 | Ending | A result card (status, time, agents, failures, reused agents, tokens, cost, Markdown or highlighted JSON preview, path of the full result). The task line shows the final state for a few seconds. |
@@ -154,7 +155,7 @@ back to the prefix rule. `ask()` answers are replayed by position and text.
 | Mistakes | Every check fails before tokens are spent, with file, line, column, a caret snippet, and the fix. The script is saved first, so the agent can edit `scriptPath` instead of resending it. Unknown options, tools, and models list the valid ones. JSON-string `args` are parsed and the agent is told. |
 | Launch | The result says: run ID, phases, script path, transcripts, "do not poll", and how to inspect. |
 | Result | `<workflow-result>` with status, counts, the result (truncated with a path to the full file), agents without a result and why, worktree branches to merge, answered questions, warnings, the last log lines, and exact resume instructions. |
-| Control | `workflow_control`: `list`, `status`, `wait` (with timeout; marks the result as delivered so it does not arrive twice), `stop` (run or agent), `pause`, `resume`, `answer`. |
+| Control | `workflow_control`: `list`, `status`, `wait` (with timeout; marks the result as delivered so it does not arrive twice), `stop` (run or agent), `pause`, `resume`, `answer`, `steer` (message to one running agent). |
 | Declined | The decline text includes the human's note, or says not to retry. |
 
 ## 4. Differences from Claude Code
@@ -162,7 +163,7 @@ back to the prefix rule. `ask()` answers are replayed by position and text.
 | Area | Claude Code | This extension |
 |---|---|---|
 | Resume rule | Prefix: the first changed or failed agent and every later agent rerun. | Happens-before: unchanged agents that did not depend on a rerun agent keep their results. |
-| Human input during a run | None (only permission prompts). | `ask()` plus permission prompts, answered inline in the monitor; the main agent can answer with `workflow_control`. |
+| Human input during a run | None (only permission prompts). | `ask()` plus permission prompts, answered inline in the monitor; messages to running agents (`m`); the main agent can answer and steer with `workflow_control`. |
 | Extra primitives | `agent`, `parallel`, `pipeline`, `phase`, `log`. | Also `race` (with cancellation), multi-stage `pipeline`, scoped `phase(title, fn)`, `env`, `budget`, `sleep`, seeded `random`/`shuffle`, `parallel` over objects. |
 | Agent options | Schema, model, isolation. | Also `tools`, `readOnly`, `cwd`, `thinking`, `instructions`, `context`, `timeout`, `maxTurns`, `retries`, `onError`, `cache`. |
 | Tool for the agent | `Workflow`; results arrive as task notifications. | `workflow` plus `workflow_control`; `wait: true` for a result in the same call. |

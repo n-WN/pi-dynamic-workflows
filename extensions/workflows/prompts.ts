@@ -65,6 +65,7 @@ Actions:
 - stop (runId, agent?): stop a whole run, or one agent by its number.
 - pause / resume (runId): hold or release new agent starts.
 - answer (runId, question, answer): answer an ask() question when the user told you the answer.
+- steer (runId, agent, message): send a correction or extra instruction to one running agent.
 Do not use status in a loop to wait; the result arrives as a <workflow-result> message.`;
 
 export function workflowsSection(cfg: WorkflowConfig, saved: Array<{ name: string; description: string; argsHint?: string }>): string {

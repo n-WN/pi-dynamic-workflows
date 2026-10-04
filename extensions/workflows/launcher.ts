@@ -52,6 +52,8 @@ export interface LaunchDeps {
 	bundledDir: string;
 	selfDirs: string[];
 	hostUi: () => ExtensionUIContext | undefined;
+	/** Abort signal of the tool call: an aborted turn closes the approval dialog (no run). */
+	signal?: AbortSignal;
 }
 
 function expandHome(p: string): string {
@@ -204,10 +206,12 @@ async function approve(deps: LaunchDeps, info: ApprovalInfo, source: { text: str
 		if (choice.action === "run-session") reg.autoApprove.add(sessionId);
 	};
 
+	const signal = deps.signal;
 	return serializeApproval(async () => {
+		if (signal?.aborted) return { ok: false };
 		if (ctx.mode !== "tui") {
 			const options = ["Yes, run it", "Yes, and approve all workflows in this session", "No"];
-			const pick = await ctx.ui.select(`Run workflow ${info.name}? ${info.description} (${info.phases.join(" → ") || "no phases listed"})`, options);
+			const pick = await ctx.ui.select(`Run workflow ${info.name}? ${info.description} (${info.phases.join(" → ") || "no phases listed"})`, options, { signal });
 			if (pick === options[0]) {
 				record({ action: "run" });
 				return { ok: true };
@@ -219,10 +223,15 @@ async function approve(deps: LaunchDeps, info: ApprovalInfo, source: { text: str
 			return { ok: false };
 		}
 		for (;;) {
-			const choice = await ctx.ui.custom<ApprovalChoice>((tui, theme, _kb, done) => new ApprovalDialog(tui, theme, info, done), {
-				overlay: true,
-				overlayOptions: { width: "86%", maxHeight: "88%", anchor: "center" },
-			});
+			const choice = await ctx.ui.custom<ApprovalChoice>(
+				(tui, theme, _kb, done) => {
+					// An aborted turn (Esc) closes the dialog: the workflow does not start.
+					signal?.addEventListener("abort", () => done({ action: "decline" }), { once: true });
+					return new ApprovalDialog(tui, theme, info, done);
+				},
+				{ overlay: true, overlayOptions: { width: "86%", maxHeight: "88%", anchor: "center" } },
+			);
+			if (signal?.aborted) return { ok: false };
 			if (!choice || choice.action === "decline") return { ok: false, feedback: choice?.feedback };
 			if (choice.action === "edit") {
 				const edited = await ctx.ui.editor(`Edit workflow ${info.name} — the run starts from your version`, source.text);

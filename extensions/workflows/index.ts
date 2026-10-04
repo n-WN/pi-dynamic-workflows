@@ -179,8 +179,9 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 			: undefined,
 	});
 
-	const launch = (params: LaunchParams, ctx: ExtensionContext, toolCtx?: ExtensionToolContext) =>
+	const launch = (params: LaunchParams, ctx: ExtensionContext, toolCtx?: ExtensionToolContext, signal?: AbortSignal) =>
 		launchWorkflow(params, {
+			signal,
 			pi,
 			ctx,
 			toolCtx,
@@ -216,7 +217,7 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 		renderResult: (result, options, theme, context) =>
 			renderWorkflowResult(result as never, options, theme, context as never),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const outcome = await launch(params as LaunchParams, ctx, ctx);
+			const outcome = await launch(params as LaunchParams, ctx, ctx, signal);
 			if (outcome.kind === "error") {
 				return {
 					content: [{ type: "text", text: outcome.message }],

@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@earendil-works/pi-coding-agent": ["/Users/hyw/.local/share/mise/installs/node/26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
+      "@earendil-works/pi-tui": ["/Users/hyw/.local/share/mise/installs/node/26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.d.ts"],
+      "@earendil-works/pi-ai": ["/Users/hyw/.local/share/mise/installs/node/26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
+      "@earendil-works/pi-agent-core": ["/Users/hyw/.local/share/mise/installs/node/26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/dist/index.d.ts"],
+      "typebox": ["/Users/hyw/.local/share/mise/installs/node/26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/index.d.mts"],
+      "typebox/value": ["/Users/hyw/.local/share/mise/installs/node/26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/value/index.d.mts"],
+      "typebox/compile": ["/Users/hyw/.local/share/mise/installs/node/26.7.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/compile/index.d.mts"]
+    }
+  },
+  "include": ["extensions/**/*.ts"]
+}

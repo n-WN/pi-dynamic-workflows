@@ -23,7 +23,7 @@ import { CONTROL_TOOL, WORKFLOW_TOOL } from "./prompts.ts";
 import { addRun, changed, getRegistry, serializeApproval } from "./registry.ts";
 import { type ReplayData, WorkflowRun } from "./run.ts";
 import { validate } from "./schema.ts";
-import { type PreparedScript, prepareScript, ScriptError } from "./script.ts";
+import { type PreparedScript, prepareScript, ScriptError, scanPlan } from "./script.ts";
 import { consentKey, discoverWorkflows, findWorkflow, loadConsent, repoRoot, runsRoot, type SavedWorkflow, saveConsent } from "./store.ts";
 import type { JournalEntry, RunSnapshot, ThinkingLevel, WorkflowSource } from "./types.ts";
 import { type ApprovalChoice, ApprovalDialog, type ApprovalInfo } from "./ui/approval.ts";
@@ -247,6 +247,7 @@ async function approve(deps: LaunchDeps, info: ApprovalInfo, source: { text: str
 							phases: prepared.meta.phases ?? [],
 							script: edited,
 							lineCount: prepared.lineCount,
+							plan: scanPlan(prepared),
 							edited: true,
 						});
 					} catch (err) {
@@ -397,6 +398,7 @@ export async function launchWorkflow(params: LaunchParams, deps: LaunchDeps): Pr
 							else if (!what && rec.status === "waiting") rec.status = "running";
 							changed();
 						},
+						onUnsupported: (what) => run.log("warn", `Agent #${rec.id} (${rec.label}): ${what}`),
 					})
 			: undefined,
 		bridgeExec: toolCtx
@@ -422,7 +424,9 @@ export async function launchWorkflow(params: LaunchParams, deps: LaunchDeps): Pr
 		script: text,
 		args,
 		limits: `up to ${cfg.maxConcurrency} at once · at most ${cfg.maxAgents} per run${target ? ` · guideline: fewer than ${target}` : ""}`,
-		model: `${defaultModel.provider}/${defaultModel.id} · thinking ${thinking} (the script can choose other models)`,
+		model: `${defaultModel.provider}/${defaultModel.id} · thinking ${thinking}`,
+		plan: scanPlan(prepared),
+		agentTools: defaultTools,
 		named: source.kind !== "inline",
 		edited: false,
 		resumeFrom: prev?.snapshot.id,

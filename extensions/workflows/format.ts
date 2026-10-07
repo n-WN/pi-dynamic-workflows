@@ -26,6 +26,14 @@ export function formatClock(ms: number): string {
 	return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
 }
 
+/** Short duration for columns: <1s, 42s, then clock style 1:02, 1:02:03. */
+export function formatSpan(ms: number): string {
+	if (!Number.isFinite(ms) || ms < 0) ms = 0;
+	if (ms < 1000) return "<1s";
+	if (ms < 60_000) return `${Math.floor(ms / 1000)}s`;
+	return formatClock(ms);
+}
+
 export function formatTokens(n: number): string {
 	if (!Number.isFinite(n) || n <= 0) return "0";
 	if (n < 1000) return String(Math.round(n));

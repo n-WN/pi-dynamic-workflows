@@ -380,3 +380,60 @@ export function peekMetaPhases(source: string | undefined): string[] | undefined
 	if (!m) return undefined;
 	return [...m[1].matchAll(/["'`]([^"'`]+)["'`]/g)].map((x) => x[1]);
 }
+
+/** What a script does, as far as its text shows. The approval dialog shows it. */
+export interface ScriptPlan {
+	/** agent() call sites. One call site in a loop or in parallel() starts many agents. */
+	agentCalls: number;
+	/** Helpers that start many agents: parallel, pipeline, race. */
+	fanOut: string[];
+	/** Call sites with readOnly: true. */
+	readOnly: number;
+	/** Call sites with isolation: "worktree". */
+	worktree: number;
+	/** Model names in the text (model: "..."). */
+	models: string[];
+	/** Tool names in tools: [...] lists. */
+	tools: string[];
+	/** ask() call sites. */
+	asks: number;
+}
+
+function literalText(t: Token | undefined): string | undefined {
+	if (!t) return undefined;
+	if (t.type === "string" || (t.type === "template" && !t.hasSubstitutions)) return t.value.slice(1, -1);
+	return undefined;
+}
+
+/** Scan the script body (after meta) for the facts of `ScriptPlan`. */
+export function scanPlan(prepared: PreparedScript): ScriptPlan {
+	const plan: ScriptPlan = { agentCalls: 0, fanOut: [], readOnly: 0, worktree: 0, models: [], tools: [], asks: 0 };
+	let sig: Token[];
+	try {
+		sig = significant(tokenize(prepared.body));
+	} catch {
+		return plan;
+	}
+	const add = (list: string[], v: string | undefined) => {
+		if (v && !list.includes(v)) list.push(v);
+	};
+	for (let i = 0; i < sig.length; i++) {
+		const t = sig[i];
+		if (t.start <= prepared.metaRange.end || t.type !== "ident") continue;
+		if (isPunct(sig[i + 1], "(") && !isMemberAccess(sig, i)) {
+			if (t.value === "agent") plan.agentCalls++;
+			else if (t.value === "ask") plan.asks++;
+			else if (t.value === "parallel" || t.value === "pipeline" || t.value === "race") add(plan.fanOut, t.value);
+			continue;
+		}
+		if (!isPunct(sig[i + 1], ":")) continue;
+		const v = sig[i + 2];
+		if (t.value === "readOnly" && isIdent(v, "true")) plan.readOnly++;
+		else if (t.value === "isolation" && literalText(v) === "worktree") plan.worktree++;
+		else if (t.value === "model") add(plan.models, literalText(v));
+		else if (t.value === "tools" && isPunct(v, "[")) {
+			for (let j = i + 3; j < sig.length && !isPunct(sig[j], "]"); j++) add(plan.tools, literalText(sig[j]));
+		}
+	}
+	return plan;
+}

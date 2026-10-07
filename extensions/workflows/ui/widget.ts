@@ -10,7 +10,7 @@ import { countAgents, formatDuration, formatTokens, oneLine, plural } from "../f
 import { getRegistry, onRegistryChange, runsOfSession } from "../registry.ts";
 import type { WorkflowRun } from "../run.ts";
 import { AGENT_ACTIVE } from "../types.ts";
-import { counters, progressBar, runIcon, spread } from "./draw.ts";
+import { counters, layoutWithRight, progressBar, runIcon } from "./draw.ts";
 
 const LINGER_MS = 8000;
 const MAX_LINES = 3;
@@ -79,19 +79,25 @@ export class WorkflowWidget implements Component {
 		const th = this.theme;
 		const lines: string[] = [];
 		const dialogs = getRegistry().dialogs.pending.filter((d) => d.questionId === undefined && runs.some((r) => r.id === d.runId));
-		for (const run of runs.slice(-MAX_LINES)) lines.push(this.runLine(run, width, now, dialogs.filter((d) => d.runId === run.id).length));
+		const shown = runs.slice(-MAX_LINES);
+		shown.forEach((run, i) => {
+			// The open key is shown once, on the last line.
+			lines.push(this.runLine(run, width, now, dialogs.filter((d) => d.runId === run.id).length, i === shown.length - 1));
+		});
 		if (runs.length > MAX_LINES) {
 			lines.unshift(truncateToWidth(th.fg("dim", `  +${runs.length - MAX_LINES} more workflows · /workflows`), width));
 		}
 		return lines;
 	}
 
-	private runLine(run: WorkflowRun, width: number, now: number, dialogs: number): string {
+	private runLine(run: WorkflowRun, width: number, now: number, dialogs: number, withKey: boolean): string {
 		const th = this.theme;
 		const c = countAgents(run.agents);
 		const name = th.bold(run.name);
 		const elapsed = formatDuration(run.elapsedMs(now));
-		const right = th.fg("dim", `${this.openKey} /workflows`);
+		const key = withKey ? th.fg("dim", `${this.openKey} /workflows`) : "";
+		const line = (parts: Array<{ text: string; priority: number; shrink?: (w: number) => string; min?: number }>, right: string) =>
+			layoutWithRight(parts, right, width);
 		if (run.isFinal) {
 			const what =
 				run.status === "completed"
@@ -99,35 +105,52 @@ export class WorkflowWidget implements Component {
 					: run.status === "failed"
 						? th.fg("error", `failed: ${oneLine(run.error ?? "", 60)}`)
 						: th.fg("warning", `stopped after ${elapsed}`);
-			const tail = run.delivered && !run.foreground ? th.fg("dim", " · result sent to the agent") : "";
-			return spread(` ${runIcon(th, run.status, now)} ${name} ${what} · ${plural(c.total, "agent")}${tail}`, right, width);
+			const bad = c.failed + c.stopped;
+			return line(
+				[
+					{ text: ` ${runIcon(th, run.status, now)} ${name}`, priority: 10 },
+					{ text: what, priority: 9, shrink: (w) => truncateToWidth(what, w, "…"), min: 12 },
+					{
+						text: th.fg("muted", `${plural(c.total, "agent")}${bad ? th.fg("error", ` · ${bad} without result`) : ""}`),
+						priority: 6,
+						shrink: () => th.fg("muted", `${plural(c.total, "agent")}${bad ? th.fg("error", ` · ${bad}✗`) : ""}`),
+					},
+					{ text: run.delivered && !run.foreground ? th.fg("dim", "result sent to the agent") : "", priority: 2 },
+				],
+				key,
+			);
 		}
 		const questions = run.pendingQuestionList.length + dialogs;
 		if (questions > 0) {
 			const q = run.pendingQuestionList[0];
-			const text = q ? `asks: ${oneLine(q.question, 60)}` : "an agent waits for your answer";
-			return spread(` ${th.fg("warning", "?")} ${name} ${th.fg("warning", text)}`, th.fg("warning", `${this.openKey} answer`), width);
+			const text = th.fg("warning", q ? `asks: ${oneLine(q.question, 200)}` : "an agent waits for your answer");
+			return line(
+				[
+					{ text: ` ${th.fg("warning", "?")} ${name}`, priority: 10 },
+					{ text, priority: 9, shrink: (w) => truncateToWidth(text, w, "…"), min: 14 },
+				],
+				th.fg("warning", `${this.openKey} answer`),
+			);
 		}
 		const phase = currentPhase(run);
-		const phaseText = phase ? `${phase.title} ${phase.done}/${phase.total}` : "starting";
+		const phaseText = th.fg("muted", phase ? `${phase.title} ${phase.done}/${phase.total}` : "starting");
 		const barWidth = Math.max(6, Math.min(24, Math.floor(width / 6)));
-		const bar = progressBar(th, c, barWidth);
 		const extras: string[] = [];
 		if (run.status === "paused") extras.push(th.fg("warning", "paused"));
 		if (run.warnings.length) extras.push(th.fg("warning", "⚠ large"));
 		if (run.scriptBusyMs(now) > 5000) extras.push(th.fg("warning", "⚠ script busy"));
-		const left = [
-			` ${runIcon(th, run.status, now)} ${name}`,
-			th.fg("muted", phaseText),
-			bar,
-			counters(th, c),
-			th.fg("dim", `${formatTokens(run.usage.totalTokens)} tok`),
-			th.fg("dim", elapsed),
-			...extras,
-		]
-			.filter(Boolean)
-			.join("  ");
-		return spread(left, right, width);
+		return line(
+			[
+				{ text: ` ${runIcon(th, run.status, now)} ${name}`, priority: 10 },
+				{ text: phaseText, priority: 7, shrink: (w) => truncateToWidth(phaseText, w, "…"), min: 8 },
+				{ text: progressBar(th, c, barWidth), priority: 3, shrink: (w) => progressBar(th, c, w), min: 6 },
+				{ text: counters(th, c), priority: 8 },
+				{ text: th.fg("dim", `${formatTokens(run.usage.totalTokens)} tok`), priority: 4 },
+				{ text: th.fg("dim", elapsed), priority: 6 },
+				{ text: extras.join(" "), priority: 9 },
+			],
+			key,
+		);
 	}
 
 	invalidate(): void {}

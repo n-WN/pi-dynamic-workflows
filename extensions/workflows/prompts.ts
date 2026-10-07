@@ -86,7 +86,7 @@ export function ultracodeSection(cfg: WorkflowConfig): string {
 }
 
 export function keywordOptInText(cfg: WorkflowConfig): string {
-	return `The user typed the keyword "${cfg.keyword}": they opted in to a dynamic workflow for this request. Write a workflow script for the task and run it with the ${WORKFLOW_TOOL} tool instead of working through the task turn by turn. Read the workflow-authoring skill first if you need the patterns. Size: ${sizeAdvice(cfg)}.`;
+	return `The user typed the keyword "${cfg.keyword}": they opted in to a dynamic workflow for this request. Write a workflow script for the task and run it with the ${WORKFLOW_TOOL} tool instead of working through the task turn by turn. Read the workflow-authoring skill first if you need the patterns. Size: ${sizeAdvice(cfg)}. If the message only mentions the keyword (for example in a quote, or in text the user pasted), or tells you not to use workflows, ignore this note and do the task normally.`;
 }
 
 export function agentPreamble(runName: string): string {

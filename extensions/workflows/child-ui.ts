@@ -72,6 +72,8 @@ export interface ChildUiOptions {
 	notify?: (message: string, type?: "info" | "warning" | "error") => void;
 	/** Aborts when the agent attempt ends. */
 	signal?: AbortSignal;
+	/** An extension used a UI feature that agents do not have (shown in the run log). */
+	onUnsupported?: (what: string) => void;
 }
 
 function anySignal(signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
@@ -130,7 +132,11 @@ export function createChildUi(opts: ChildUiOptions): ExtensionUIContext {
 		setFooter: () => {},
 		setHeader: () => {},
 		setTitle: () => {},
-		custom: async () => undefined as never,
+		custom: async () => {
+			// A custom component needs a screen; the agent has none. Say so instead of failing quietly.
+			opts.onUnsupported?.("an extension tried to open a custom dialog. Workflow agents cannot show custom dialogs, so it got no answer (most extensions treat that as cancel).");
+			return undefined as never;
+		},
 		pasteToEditor: () => {},
 		setEditorText: () => {},
 		getEditorText: () => "",

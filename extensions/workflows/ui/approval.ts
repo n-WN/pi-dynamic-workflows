@@ -9,7 +9,8 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { highlightCode } from "@earendil-works/pi-coding-agent";
 import { type Component, Input, matchesKey, type TUI, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { oneLine, previewJson } from "../format.ts";
+import { oneLine, plural, previewJson } from "../format.ts";
+import type { ScriptPlan } from "../script.ts";
 import { box, hints, section } from "./draw.ts";
 
 export type ApprovalChoice =
@@ -30,11 +31,28 @@ export interface ApprovalInfo {
 	args: unknown;
 	limits: string;
 	model: string;
+	/** Facts from the script text: agent() calls, fan-out, tools, isolation, models, questions. */
+	plan?: ScriptPlan;
+	/** Tools an agent gets when the script does not choose. */
+	agentTools?: string[];
 	/** Saved, bundled, or file workflow: offer "don't ask again for <name>". */
 	named: boolean;
 	edited: boolean;
 	resumeFrom?: string;
 	notes: string[];
+}
+
+function shortHome(p: string): string {
+	const home = process.env.HOME;
+	return home && p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+}
+
+/** Keep the start and the end of a long path. */
+function middleCut(text: string, width: number): string {
+	if (text.length <= width) return text;
+	const keep = Math.max(4, width - 1);
+	const head = Math.ceil(keep * 0.4);
+	return `${text.slice(0, head)}…${text.slice(text.length - (keep - head))}`;
 }
 
 interface Option {
@@ -164,17 +182,42 @@ export class ApprovalDialog implements Component {
 			});
 		}
 
-		const label = (k: string) => th.fg("muted", k.padEnd(9));
+		const LABEL = 10;
+		const label = (k: string) => th.fg("muted", k.padEnd(LABEL));
 		const lines: string[] = [];
+		// A labeled row; long values wrap under the value column.
+		const row = (k: string, value: string) => {
+			wrapTextWithAnsi(value, Math.max(10, inner - LABEL)).forEach((l, i) => lines.push(`${i === 0 ? label(k) : " ".repeat(LABEL)}${l}`));
+		};
+		const dot = th.fg("dim", " · ");
 		lines.push(`${th.fg("accent", "◆")} ${th.bold(info.name)}${info.edited ? th.fg("warning", "  (edited)") : ""}`);
 		for (const l of wrapTextWithAnsi(info.description, inner - 2).slice(0, 3)) lines.push(`  ${th.fg("text", l)}`);
 		lines.push("");
-		if (info.phases.length) lines.push(`${label("Phases")}${info.phases.map((p, i) => `${th.fg("dim", `${i + 1}`)} ${p}`).join(th.fg("dim", "  →  "))}`);
-		lines.push(`${label("Script")}${info.source} · ${info.lineCount} lines · ${th.fg("dim", oneLine(info.scriptPath, inner - 40))}`);
-		if (info.args !== undefined) lines.push(`${label("Args")}${oneLine(previewJson(info.args, 300), inner - 10)}`);
-		lines.push(`${label("Agents")}${info.limits}`);
-		lines.push(`${label("Model")}${info.model}`);
-		if (info.resumeFrom) lines.push(`${label("Resume")}from ${info.resumeFrom}: unchanged completed agents reuse their results`);
+		if (info.phases.length) row("Phases", info.phases.map((p, i) => `${th.fg("dim", `${i + 1}`)} ${p}`).join(th.fg("dim", "  →  ")));
+		const plan = info.plan;
+		if (plan) {
+			const calls = plan.agentCalls ? plural(plan.agentCalls, "agent() call") + " in the script" : "no agent() calls found in the script";
+			const fan = plan.fanOut.length
+				? `${plan.fanOut.join(", ")}: ${th.fg("warning", "the number of agents is known only at run time")}`
+				: "no fan-out: one agent per call";
+			row("Plan", [calls, fan].join(dot));
+		}
+		row("Agents", info.limits);
+		if (plan) {
+			const tools = [
+				`by default ${th.bold((info.agentTools ?? []).join(", ") || "no tools")}`,
+				plan.readOnly ? `read-only at ${plural(plan.readOnly, "call")}` : "",
+				plan.tools.length ? `the script also names ${plan.tools.join(", ")}` : "",
+			].filter(Boolean);
+			row("Tools", tools.join(dot));
+			if (plan.worktree) row("Isolation", `${plural(plan.worktree, "call")} in its own git worktree: changes go to new branches, not to your working tree`);
+		}
+		row("Model", [info.model, plan?.models.length ? `the script also names ${plan.models.join(", ")}` : ""].filter(Boolean).join(dot));
+		if (plan?.asks) row("Questions", `${plural(plan.asks, "ask() call")}: the run can stop and wait for your answer`);
+		row("Script", `${info.source} · ${info.lineCount} lines`);
+		lines.push(`${" ".repeat(LABEL)}${th.fg("dim", middleCut(shortHome(info.scriptPath), inner - LABEL))}`);
+		if (info.args !== undefined) row("Args", oneLine(previewJson(info.args, 300), 300));
+		if (info.resumeFrom) row("Resume", `from ${info.resumeFrom}: unchanged completed agents reuse their results`);
 		for (const n of info.notes) lines.push(th.fg("warning", `⚠ ${n}`));
 		lines.push("");
 

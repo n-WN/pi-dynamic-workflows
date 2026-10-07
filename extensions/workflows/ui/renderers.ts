@@ -15,7 +15,12 @@ import { getRegistry, onRegistryChange } from "../registry.ts";
 import type { WorkflowRun } from "../run.ts";
 import { peekMetaName, peekMetaPhases } from "../script.ts";
 import { AGENT_ACTIVE, type RunStatus } from "../types.ts";
-import { counters, progressBar, runIcon, runStatusColor, spinner } from "./draw.ts";
+import { counters, phaseGlyph, phaseState, progressBar, runIcon, runStatusColor, spinner } from "./draw.ts";
+
+function shortHome(p: string): string {
+	const home = process.env.HOME;
+	return home && p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+}
 
 export interface WorkflowToolArgs {
 	script?: string;
@@ -53,6 +58,10 @@ export interface ResultMessageDetails {
 	cost: number;
 	preview: string;
 	previewIsMarkdown: boolean;
+	/** Object results: one entry per top-level field (long text fields render as markdown). */
+	fields?: Array<{ key: string; text: string; markdown: boolean }>;
+	/** Phases in order, for the summary line. */
+	phases?: Array<{ title: string; agents: number; failed: number; tokens: number }>;
 	resultPath: string;
 	scriptPath: string;
 	error?: string;
@@ -98,12 +107,12 @@ export function runSummaryLines(run: WorkflowRun, theme: Theme, expanded: boolea
 	for (const a of run.agents) if (!phaseTitles.includes(a.phase)) phaseTitles.push(a.phase);
 	const phaseBits = phaseTitles.map((title) => {
 		const agents = run.agents.filter((a) => a.phase === title);
-		if (agents.length === 0) return theme.fg("dim", `○ ${title}`);
+		const planned = run.phases.some((p) => p.title === title && p.planned);
+		const state = phaseState(agents, planned, run.questions.filter((q) => q.phase === title));
+		if (agents.length === 0) return `${phaseGlyph(theme, state, now)} ${theme.fg("dim", title)}`;
 		const pc = countAgents(agents);
-		const active = agents.some((a) => AGENT_ACTIVE.has(a.status) || a.status === "queued");
-		const icon = active ? theme.fg("accent", spinner(now)) : pc.failed ? theme.fg("warning", "✓") : theme.fg("success", "✓");
 		const finished = pc.total - pc.active - pc.queued;
-		return `${icon} ${title} ${theme.fg("dim", `${finished}/${pc.total}`)}`;
+		return `${phaseGlyph(theme, state, now)} ${title} ${theme.fg("dim", `${finished}/${pc.total}`)}${pc.failed ? theme.fg("error", ` ${pc.failed}✗`) : ""}`;
 	});
 	if (!expanded) {
 		if (phaseBits.length) lines.push(`  ${phaseBits.join(theme.fg("dim", "  ·  "))}`);
@@ -113,8 +122,8 @@ export function runSummaryLines(run: WorkflowRun, theme: Theme, expanded: boolea
 			const pc = countAgents(agents);
 			lines.push(`  ${title.padEnd(18)} ${progressBar(theme, pc, 20)} ${counters(theme, pc)}`);
 		}
-		lines.push(theme.fg("dim", `  script ${run.scriptPath}`));
-		lines.push(theme.fg("dim", `  transcripts ${run.transcriptDir}`));
+		lines.push(theme.fg("dim", `  script ${shortHome(run.scriptPath)}`));
+		lines.push(theme.fg("dim", `  transcripts ${shortHome(run.transcriptDir)}`));
 		for (const l of run.logs.slice(-3)) lines.push(theme.fg("muted", `  log: ${oneLine(l.text, 100)}`));
 	}
 	for (const w of run.warnings) lines.push(theme.fg("warning", `  ⚠ ${w}`));
@@ -240,21 +249,51 @@ export function renderResultMessage(
 	].filter(Boolean);
 	const header = `${icon} ${theme.fg("customMessageLabel", theme.bold("Workflow"))} ${theme.bold(d.name)} ${theme.fg(runStatusColor(d.status), d.status)} ${theme.fg("dim", `· ${parts.join(" · ")}`)}`;
 	container.addChild(new Text(header, 0, 0));
+	if (d.phases && d.phases.length > 1) {
+		const chain = d.phases
+			.map((p) => `${p.title} ${theme.fg("muted", String(p.agents))}${p.failed ? theme.fg("error", ` (${p.failed} failed)`) : ""}`)
+			.join(theme.fg("dim", " → "));
+		container.addChild(new Text(theme.fg("dim", "phases ") + chain, 0, 0));
+	}
 	if (d.error && d.status !== "completed") container.addChild(new Text(theme.fg(d.status === "failed" ? "error" : "warning", oneLine(d.error, 300)), 0, 0));
-	const preview = d.preview.trim();
-	if (preview) {
-		const maxLines = options.expanded ? Number.POSITIVE_INFINITY : 14;
-		const lines = preview.split("\n");
-		const shown = lines.slice(0, maxLines).join("\n");
+	const maxLines = options.expanded ? Number.POSITIVE_INFINITY : 14;
+	let hidden = 0;
+	if (d.fields?.length) {
+		// Object result: one block per field; long text renders as markdown.
+		let budget = maxLines;
 		const inner = new Container();
-		if (d.previewIsMarkdown) inner.addChild(new Markdown(shown, 0, 0, getMarkdownTheme()));
-		else inner.addChild(new Text(highlightCode(shown, "json").join("\n"), 0, 0));
+		for (const f of d.fields) {
+			const lines = f.text.split("\n");
+			if (budget <= 0) {
+				hidden += lines.length + 1;
+				continue;
+			}
+			if (f.markdown) {
+				inner.addChild(new Text(theme.fg("accent", theme.bold(f.key)), 0, 0));
+				const shown = lines.slice(0, Math.max(1, budget - 1));
+				inner.addChild(new Markdown(shown.join("\n"), 2, 0, getMarkdownTheme()));
+				hidden += lines.length - shown.length;
+				budget -= shown.length + 1;
+			} else {
+				inner.addChild(new Text(`${theme.fg("accent", theme.bold(f.key))}  ${highlightCode(f.text, "json").join(" ")}`, 0, 0));
+				budget -= 1;
+			}
+		}
 		container.addChild(inner);
-		if (lines.length > maxLines) {
-			container.addChild(new Text(theme.fg("dim", `… ${lines.length - maxLines} more lines (ctrl+o expands)`), 0, 0));
+	} else {
+		const preview = d.preview.trim();
+		if (preview) {
+			const lines = preview.split("\n");
+			const shown = lines.slice(0, maxLines).join("\n");
+			const inner = new Container();
+			if (d.previewIsMarkdown) inner.addChild(new Markdown(shown, 0, 0, getMarkdownTheme()));
+			else inner.addChild(new Text(highlightCode(shown, "json").join("\n"), 0, 0));
+			container.addChild(inner);
+			hidden = Math.max(0, lines.length - maxLines);
 		}
 	}
-	container.addChild(new Text(theme.fg("dim", `run ${d.runId} · /workflows ${d.runId} · full result ${d.resultPath}`), 0, 0));
+	if (hidden > 0) container.addChild(new Text(theme.fg("dim", `… ${hidden} more lines (ctrl+o expands)`), 0, 0));
+	container.addChild(new Text(theme.fg("dim", `run ${d.runId} · /workflows ${d.runId} · full result ${shortHome(d.resultPath)}`), 0, 0));
 	return container;
 }
 

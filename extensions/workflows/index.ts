@@ -40,7 +40,7 @@ import { acceptsString, validate } from "./schema.ts";
 import { renameScript } from "./script.ts";
 import { discoverWorkflows, findWorkflow, personalWorkflowDir, projectSaveDir, runsRoot, type SavedWorkflow, saveWorkflowFile } from "./store.ts";
 import type { RunSnapshot } from "./types.ts";
-import { KeywordEditor, keywordRegex } from "./ui/editor.ts";
+import { KeywordEditor, keywordHits, styleKeywordHits } from "./ui/editor.ts";
 import { WorkflowMonitor } from "./ui/monitor.ts";
 import {
 	renderOptInMessage,
@@ -411,7 +411,7 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 	pi.registerMessageRenderer(OPTIN_TYPE, (message, options, theme) => renderOptInMessage(message, options, theme));
 	pi.registerMarkdownTransformer((markdown, context) => {
 		if (context.messageType !== "user" || !cfg.keywordTrigger) return markdown;
-		return markdown.replace(keywordRegex(cfg.keyword, "gi"), (m) => `**⚡${m}**`);
+		return styleKeywordHits(markdown, cfg.keyword, (m) => `**⚡${m}**`);
 	});
 
 	// ---------------------------------------------------------------------------
@@ -520,7 +520,7 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 		description: "Dismiss the ultracode keyword in the prompt, or open /workflows",
 		handler: async (ctx) => {
 			const text = ctx.hasUI ? ctx.ui.getEditorText() : "";
-			if (cfg.keywordTrigger && keywordRegex(cfg.keyword).test(text)) {
+			if (cfg.keywordTrigger && keywordHits(text, cfg.keyword).length > 0) {
 				keywordDismissed = !keywordDismissed;
 				// Redraw the editor with the new state.
 				ctx.ui.setEditorText(text);
@@ -768,7 +768,7 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 	pi.on("input", async (event, ctx) => {
 		if (passive || !cfg.enabled || !cfg.keywordTrigger) return { action: "continue" };
 		const human = (ctx.mode === "tui" && event.source === "interactive") || (ctx.mode === "rpc" && event.source === "rpc");
-		const has = keywordRegex(cfg.keyword).test(event.text);
+		const has = keywordHits(event.text, cfg.keyword).length > 0;
 		if (!has) {
 			keywordDismissed = false;
 			return { action: "continue" };

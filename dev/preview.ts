@@ -10,7 +10,7 @@
  *   <outDir>/index.html   all captures with colors (screenshot it with a browser)
  */
 
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -174,8 +174,11 @@ phase("Summarize")
 return await agent("Summarize findings")
 `;
 
+const runDirs: string[] = [];
+
 function makeRun(id: string, source: string, args: unknown, maxConcurrency: number): WorkflowRun {
 	const dir = mkdtempSync(join(tmpdir(), "wf-preview-run-"));
+	runDirs.push(dir);
 	const scriptPath = join(dir, "script.js");
 	writeFileSync(scriptPath, source);
 	const run = new WorkflowRun({
@@ -443,5 +446,6 @@ ${captures.map((c) => `<h3>${esc(c.name)} (${c.width} columns)</h3><div class="f
 </body></html>`;
 writeFileSync(join(outDir, "index.html"), html);
 for (const c of captures) writeFileSync(join(outDir, `${c.name}.html`), html.replace(/<body>[\s\S]*<\/body>/, `<body><div class="frame"><pre>${c.lines.map(ansiToHtml).join("\n")}</pre></div></body>`));
+for (const d of runDirs) rmSync(d, { recursive: true, force: true });
 console.log(`${captures.length} captures in ${outDir}`);
 process.exit(0);

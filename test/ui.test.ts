@@ -232,3 +232,14 @@ test("a dialog queue of an older copy of the extension gets the current methods"
 	assert.equal(q.timesSeen(req), 1);
 	assert.equal(await q.run({ ...req, source: "b" }, async () => undefined, () => undefined), true);
 });
+
+test("one-line previews: markdown as plain text, data as key: value", async () => {
+	const { plainText, compactValue } = await import("../extensions/workflows/ui/monitor.ts");
+	assert.equal(plainText("# Route Auth Audit Report\n\n**Summary:** Four routes miss `requireAuth`. See [docs](https://x.y)."), "Route Auth Audit Report Summary: Four routes miss requireAuth. See docs.");
+	assert.equal(plainText("| File | Line |\n| --- | --- |\n| a.ts | 5 |"), "File · Line a.ts · 5");
+	assert.equal(
+		compactValue({ findings: [{ handler: "GET /admin/stats", line: 5 }], ok: true }),
+		"findings: [1] handler: GET /admin/stats · line: 5 · ok: true",
+	);
+	assert.equal(compactValue({ findings: [] }), "findings: []");
+});

@@ -9,6 +9,15 @@ This is a pi implementation of the "dynamic workflows" feature of Claude Code,
 written from scratch for the pi extension API. See [DESIGN.md](DESIGN.md) for the
 architecture and the differences.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dark/run-mid.webp">
+  <img alt="The /workflows monitor during a run: progress, live slots, and an activity track per phase" src="docs/screenshots/light/run-mid.webp">
+</picture>
+
+The screenshots are real captures of pi in a terminal, not mockups: they follow your
+GitHub theme (dark or light). A third set shows a warm light terminal, and the
+[gallery](docs/screenshots/README.md) has every screen in all three.
+
 ## Install
 
 ```bash
@@ -33,33 +42,17 @@ Requirements: pi 1.0 or later, Node.js 22.19 or later.
 | `/deep-research <question>` | Bundled workflow: plan, search, read, cross-check claims, write a cited report. It needs a web search tool (for example an MCP server). |
 | `/<name>` | A workflow that you saved from an earlier run. |
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dark/keyword.webp">
+  <img alt="The editor highlights the ultracode keyword and says what it does" src="docs/screenshots/light/keyword.webp">
+</picture>
+
 Before a run starts, an approval dialog shows the plan:
 
-```
-╭─ Run workflow? ──────────────────────────────────────────── uses many tokens ╮
-│ ◆ deep-research                                                              │
-│   Research a question across many web sources, cross-check the key claims,   │
-│   and return a cited report                                                  │
-│                                                                              │
-│ Phases    1 Scope  →  2 Search  →  3 Fetch  →  4 Verify  →  5 Synthesize     │
-│ Plan      5 agent() calls in the script · parallel, pipeline: the number of  │
-│           agents is known only at run time                                   │
-│ Agents    up to 4 at once · at most 1000 per run · guideline: fewer than 10  │
-│ Tools     by default read, bash, edit, write · read-only at 1 call           │
-│ Isolation 1 call in its own git worktree: changes go to new branches, not to │
-│           your working tree                                                  │
-│ Model     provider/model · thinking medium · the script also names           │
-│           provider/bigger-model                                              │
-│ Script    written for this task · 24 lines                                   │
-│           ~/.pi/agent/workflows/runs/01a1…/wf-res001/script.js               │
-│                                                                              │
-│ ❯ 1. Yes, run it                                                             │
-│   2. Yes, and approve all workflows in this session                          │
-│   3. View the script                                                         │
-│   4. No, and tell the agent what to change                                   │
-│   5. No                                                                      │
-╰─ ↑↓ select · enter confirm · v script · ctrl+g edit · tab feedback · esc no ─╯
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dark/approval.webp">
+  <img alt="The approval dialog: phases, plan facts from the script, tools, model, budget, and the choices" src="docs/screenshots/light/approval.webp">
+</picture>
 
 The Plan, Tools, Isolation, Model, and Questions rows come from the script text:
 `agent()` call sites, `parallel`/`pipeline`/`race`, `readOnly: true`,
@@ -72,12 +65,14 @@ The Plan, Tools, Isolation, Model, and Questions rows come from the script text:
 
 ## Watch and control
 
-While a run goes on, a line below the editor shows it. On a narrow terminal the
-parts with less value go first (the key hint, the bar, the tokens):
+While a run goes on, its tool row in the conversation and a line below the editor
+show it. On a narrow terminal the task line drops the parts with less value first
+(the key hint, the bar, the tokens):
 
-```
- ⠹ audit-routes  Audit 12/40  ━━━━━━━━━━━──────  3⟳ 1✗  418k tok  2m13s           alt+w /workflows
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dark/taskline.webp">
+  <img alt="The live tool row in the conversation and the task line below the editor" src="docs/screenshots/light/taskline.webp">
+</picture>
 
 `/workflows` (or `alt+w` with an empty prompt) opens the monitor:
 
@@ -91,33 +86,25 @@ time axis: how many agents of the phase ran at each moment (full height = all
 slots busy). It shows the shape of the run at a glance: barriers between phases,
 overlap in a `pipeline()`, the slow tail of a phase, and failures (red).
 
-```
-╭─ Workflows › deep-research ────────────────────────────────── ✓ completed 6m ╮
-│ wf-res001 · written for this task                                            │
-│ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 23/23 │
-│ 21 done · 2 failed                                               155k tokens │
-│                                                                              │
-│ PHASES            done            tokens time 0:00                      6:12 │
-│ ❯ ✓ Scope          1/1              8.2k  12s ▂▂▂                            │
-│   ⚠ Search         5/5 1✗          45.2k 1:10   ▃████▆▃▂▁                    │
-│   ✓ Fetch          8/8               52k 1:31           ▇████▅▄▂▂▂           │
-│   ⚠ Verify         8/8 1✗            36k 1:20                    ▄███▇▃▂     │
-│   ✓ Synthesize     1/1             13.1k  41s                          ▁▂▂▂▂ │
-│     all agents   23/23 peak 4/4     155k 6:12 ▂▂▄████▆▃▂▇████▅▄▂▂▅███▇▃▂▂▂▂▂ │
-╰─ ↑↓ phase · enter agents · t timeline · v script · ? keys · esc back ────────╯
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dark/run-end.webp">
+  <img alt="The run view at the end: one activity track per phase on the run's time axis" src="docs/screenshots/light/run-end.webp">
+</picture>
+
+Enter on a phase lists its agents, with a preview of the selected one:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dark/phase-mid.webp">
+  <img alt="The phase view: the agents of a phase and a preview of the selected agent" src="docs/screenshots/light/phase-mid.webp">
+</picture>
 
 `t` opens the timeline: one bar per agent, grouped by phase. Dots show the time an
 agent waited for a free slot; `o` sorts by duration to find the slow agents.
 
-```
-│ by start               0:00           2:00           4:00                    │
-│                        ┬──────────────┬──────────────┬──────────────┬        │
-│ ⚠ SEARCH 5 agents          ██████▇▆▄▂▂▂                                      │
-│   ✓ #1 search: market…     ━━━━━━━━                                     58s  │
-│   ✗ #4 search: pricing     ━━━━━━                                       41s  │
-│   ✓ #5 search: risks       ·····━━━━━━━                                 52s  │
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dark/timeline-end.webp">
+  <img alt="The timeline: one bar per agent, grouped by phase; dots are time spent waiting for a free slot" src="docs/screenshots/light/timeline-end.webp">
+</picture>
 
 Glyphs: `✓` done, `⚠` a finished phase where some agents failed, `✗` failed, `↺`
 a result reused from an earlier run, `·` queued, `○` a planned phase that has not
@@ -159,11 +146,31 @@ in the monitor:
 When a run ends, a result card appears in the conversation and the agent continues
 with the result.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dark/result-card.webp">
+  <img alt="The result card in the conversation, with the phases and the report" src="docs/screenshots/light/result-card.webp">
+</picture>
+
 ### A hung agent
 
 An agent without any activity for a minute shows `quiet 4m12s` in the agent list,
 and its detail view says what you can do. The main agent sees the same in
-`workflow_control status`. Steps from light to heavy:
+`workflow_control status`.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dark/hang-list.webp">
+  <img alt="An agent that hangs in a command shows as quiet" src="docs/screenshots/light/hang-list.webp">
+</picture>
+
+`i` stops only the hanging step. The agent keeps its conversation and goes on, here
+with a message:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dark/hang-interrupt.webp">
+  <img alt="Interrupt: stop the current step and send a message" src="docs/screenshots/light/hang-interrupt.webp">
+</picture>
+
+Steps from light to heavy:
 
 | Step | Keeps the agent's work | How |
 |---|---|---|

@@ -231,6 +231,8 @@ export class WorkflowMonitor implements Component {
 	private readonly timer: ReturnType<typeof setInterval>;
 	private past: RunSnapshot[] = [];
 	private lastBodyHeight = 20;
+	/** Scroll position of the agent detail ("lines 1-28 of 35"), for the box border. */
+	private scrollPos?: string;
 	private highWater = MIN_BODY;
 	private lastViewKey = "";
 
@@ -886,11 +888,13 @@ export class WorkflowMonitor implements Component {
 			case "timeline": {
 				const run = this.findRun(v.runId);
 				if (!run) return this.missing(v.runId);
+				const lines = this.timelineLines(run, v, inner, height, now);
+				const selected = this.timelineRows(run, v.order, now).flatMap((r) => (r.kind === "agent" ? [r.a] : []))[v.sel];
 				return {
 					title: `Workflows › ${run.name} › timeline`,
 					right: this.runRight(run, now),
-					lines: this.timelineLines(run, v, inner, height, now),
-					footer: [...nav, ["↑↓", "select"], ["enter", "detail"], ["o", v.order === "start" ? "by duration" : "by start"], ["esc", "back"]],
+					lines,
+					footer: [...nav, ["↑↓", "select"], ["enter", "detail"], ["o", v.order === "start" ? "by duration" : "by start"], ...this.agentKeys(run, selected), ["esc", "back"]],
 				};
 			}
 			case "phase": {
@@ -900,23 +904,26 @@ export class WorkflowMonitor implements Component {
 				const c = countAgents(agents);
 				const models = [...new Set(agents.map((a) => shortModel(a.model)).filter(Boolean))];
 				const right = [`${c.done + c.cached + c.failed + c.stopped + c.skipped}/${c.total} finished`, models.length === 1 ? models[0] : "", v.filter !== "all" ? `filter: ${v.filter}` : ""].filter(Boolean).join(" · ");
+				const lines = this.phaseLines(run, v, inner, height, now);
+				const selected = agents.filter((a) => agentMatches(a, v.filter))[v.sel];
 				return {
 					title: `Workflows › ${run.name} › ${v.phase}`,
 					right: th.fg("muted", right),
-					lines: this.phaseLines(run, v, inner, height, now),
-					footer: [...nav, ["↑↓", "select"], ["enter", "detail"], ["f", "filter"], ["m", "message"], ["i", "interrupt"], ["r", "restart"], ["x", "stop"], ["esc", "back"]],
+					lines,
+					footer: [...nav, ["↑↓", "select"], ["enter", "detail"], ["f", "filter"], ...this.agentKeys(run, selected), ["esc", "back"]],
 				};
 			}
 			case "agent": {
 				const run = this.findRun(v.runId);
 				const agent = run?.agents[v.agentId];
 				if (!run || !agent) return this.missing(v.runId);
+				const lines = this.agentLines(run, agent, v, inner, height, now);
 				const status = `${agentIcon(th, agent.status, now)} ${th.fg(this.agentColor(agent.status), agent.status)} ${th.fg("muted", formatSpan(agentDuration(agent, now)))}`;
 				return {
 					title: `${run.name} › ${agent.phase} › #${agent.id} ${agent.label}`,
-					right: status,
-					lines: this.agentLines(run, agent, v, inner, height, now),
-					footer: [...nav, ["↑↓", "scroll"], ["enter", v.expanded ? "collapse" : "expand"], ["m", "message"], ["i", "interrupt"], ["r", "restart"], ["x", "stop"], ["esc", "back"]],
+					right: this.scrollPos ? `${th.fg("dim", this.scrollPos)}${th.fg("dim", " · ")}${status}` : status,
+					lines,
+					footer: [...nav, ["↑↓", "scroll"], ["enter", v.expanded ? "collapse" : "expand"], ...this.agentKeys(run, agent), ["esc", "back"]],
 				};
 			}
 			case "script": {
@@ -941,6 +948,14 @@ export class WorkflowMonitor implements Component {
 				};
 			}
 		}
+	}
+
+	/** Key hints for one agent: only the actions that apply to its state. */
+	private agentKeys(run: RunLike, a: AgentRecord | undefined): Array<[string, string]> {
+		if (!a || !isLive(run) || run.isFinal) return [];
+		if (AGENT_ACTIVE.has(a.status)) return [["m", "message"], ["i", "interrupt"], ["r", "restart"], ["x", "stop"]];
+		if (a.status === "queued") return [["x", "stop"]];
+		return [];
 	}
 
 	private agentColor(s: AgentStatus): "accent" | "warning" | "success" | "error" | "muted" | "dim" {
@@ -1167,7 +1182,8 @@ export class WorkflowMonitor implements Component {
 				time: Number.isFinite(first) ? formatSpan(Math.max(0, last - first)) : "",
 			};
 		});
-		const titleW = clamp(Math.max(5, ...phases.map((p) => p.title.length)), 6, 20);
+		const withAgentsCount = rows.filter((r) => r.agents.length).length;
+		const titleW = clamp(Math.max(5, ...phases.map((p) => p.title.length), withAgentsCount >= 2 ? 10 : 0), 6, 20);
 		const doneW = 7;
 		const extraW = 10;
 		const tokW = 6;
@@ -1186,8 +1202,7 @@ export class WorkflowMonitor implements Component {
 			[pc.active ? th.fg("accent", `${pc.active}⟳`) : "", pc.failed ? th.fg("error", `${pc.failed}✗`) : "", pc.stopped ? th.fg("warning", `${pc.stopped}■`) : "", pc.cached ? th.fg("muted", `${pc.cached}↺`) : ""]
 				.filter(Boolean)
 				.join(" ");
-		const withAgents = rows.filter((r) => r.agents.length).length;
-		const total = withAgents >= 2 ? 1 : 0;
+		const total = withAgentsCount >= 2 ? 1 : 0;
 		const { start, end } = windowAround(rows.length, selected, Math.max(1, room - 1 - total));
 		for (let i = start; i < end; i++) {
 			const r = rows[i];
@@ -1362,7 +1377,7 @@ export class WorkflowMonitor implements Component {
 			case "waiting":
 				return th.fg("warning", oneLine(`waits for you: ${a.waitingFor ?? ""}`, width));
 			case "done":
-				return th.fg("text", oneLine(previewJson(a.result, 200) || "(empty answer)", width));
+				return th.fg("text", oneLine(a.result === undefined || a.result === "" ? "(empty answer)" : resultSummary(a.result), width));
 			case "cached":
 				return th.fg("muted", oneLine(`saved result from ${a.fromRunId ?? "an earlier run"}`, width));
 			case "failed":
@@ -1447,7 +1462,7 @@ export class WorkflowMonitor implements Component {
 		const nameW = Math.min(18, Math.max(6, ...a.toolCalls.map((t) => t.name.length)));
 		for (const t of a.toolCalls) {
 			const icon = t.status === "running" ? th.fg("accent", spinner(now)) : t.status === "error" ? th.fg("error", "✗") : th.fg("success", "✓");
-			const dur = t.endedAt ? `${((t.endedAt - t.startedAt) / 1000).toFixed(1)}s` : formatClock(now - t.startedAt);
+			const dur = t.endedAt ? (t.endedAt - t.startedAt < 100 ? "<0.1s" : `${((t.endedAt - t.startedAt) / 1000).toFixed(1)}s`) : formatClock(now - t.startedAt);
 			all.push(`${icon} ${fit(th.bold(t.name), nameW)} ${fit(t.summary, Math.max(10, inner - nameW - 11))} ${fitRight(th.fg("dim", dur), 6)}`);
 			if (v.expanded) {
 				if (t.argsPreview) for (const l of wrapTextWithAnsi(t.argsPreview, inner - 4).slice(0, 8)) all.push(th.fg("dim", `    ${l}`));
@@ -1468,28 +1483,44 @@ export class WorkflowMonitor implements Component {
 			if (!v.expanded && resLines.length > 16) all.push(th.fg("dim", `… ${resLines.length - 16} more lines (enter expands)`));
 		}
 		v.scroll = Math.min(v.scroll, Math.max(0, all.length - height));
-		const out = all.slice(v.scroll, v.scroll + height);
-		if (all.length > height) {
-			const pos = `${v.scroll + 1}-${Math.min(all.length, v.scroll + height)}/${all.length}`;
-			out[out.length - 1] = spread(out[out.length - 1] ?? "", th.fg("dim", pos), inner);
-		}
-		void run;
-		return out;
+		// The scroll position shows in the box border (the title line), not over the content.
+		this.scrollPos = all.length > height ? `lines ${v.scroll + 1}-${Math.min(all.length, v.scroll + height)} of ${all.length}` : undefined;
+		return all.slice(v.scroll, v.scroll + height);
 	}
 }
 
-/** One readable line for a result: text as it is; object fields as key: value. */
+/** Markdown as one line of plain text: no heading marks, emphasis, code ticks, links, or table rules. */
+export function plainText(text: string): string {
+	return text
+		.replace(/```[\s\S]*?```/g, " ")
+		.replace(/^\s{0,3}#{1,6}\s+/gm, "")
+		.replace(/^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/gm, "")
+		.replace(/\*\*|__|`/g, "")
+		.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+		.replace(/^[ \t]*\|[ \t]*|[ \t]*\|[ \t]*$/gm, "")
+		.replace(/\s*\|\s*/g, " · ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+/** Data as one readable line: "findings: [1] handler: GET /admin · line: 5 · issue: ...". */
+export function compactValue(v: unknown, depth = 0): string {
+	if (v === null || v === undefined) return String(v);
+	if (typeof v === "string") return plainText(v);
+	if (typeof v !== "object") return String(v);
+	// A list shows its length and its first item (at the same depth).
+	if (Array.isArray(v)) return v.length === 0 ? "[]" : `[${v.length}] ${compactValue(v[0], depth)}`;
+	const entries = Object.entries(v as Record<string, unknown>);
+	if (entries.length === 0) return "{}";
+	if (depth >= 2) return `{${plural(entries.length, "key")}}`;
+	return entries.map(([k, x]) => `${k}: ${compactValue(x, depth + 1)}`).join(" · ");
+}
+
+/** One readable line for a result. */
 function resultSummary(value: unknown): string {
 	if (value === undefined) return "(no value returned)";
-	if (typeof value === "string") return value || "(empty text)";
-	if (value && typeof value === "object" && !Array.isArray(value)) {
-		const entries = Object.entries(value as Record<string, unknown>);
-		if (entries.length && entries.length <= 12) {
-			return entries.map(([k, v]) => `${k}: ${typeof v === "string" ? oneLine(v, 120) : oneLine(previewJson(v, 120), 120)}`).join(" · ");
-		}
-	}
-	if (Array.isArray(value)) return `${value.length} items: ${oneLine(previewJson(value, 300), 300)}`;
-	return oneLine(previewJson(value, 300), 300);
+	if (typeof value === "string") return plainText(value) || "(empty text)";
+	return compactValue(value);
 }
 
 function live(run: RunLike): boolean {

@@ -698,7 +698,9 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 			lines.push(`The user's input: ${input}`);
 			lines.push(`Convert it to an args value that matches this JSON Schema: ${JSON.stringify(schema)}`);
 		}
-		lines.push("When its result arrives, present it to the user.");
+		// Explicit, so the model does not weigh wait: true: the run goes on in the background,
+		// and its <workflow-result> message starts the next turn.
+		lines.push("Start it in the background (do not pass wait) and end your turn. Its <workflow-result> message arrives when the run ends; then present the result to the user.");
 		pi.sendUserMessage(lines.join("\n"), ctx.isIdle() ? undefined : { deliverAs: "followUp" });
 	};
 

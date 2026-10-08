@@ -446,7 +446,7 @@ export async function launchWorkflow(params: LaunchParams, deps: LaunchDeps): Pr
 		scriptPath,
 		script: text,
 		args,
-		limits: `up to ${cfg.maxConcurrency} at once · at most ${cfg.maxAgents} per run${target ? ` · guideline: fewer than ${target}` : ""}`,
+		limits: `up to ${cfg.maxConcurrency} at once · at most ${cfg.maxAgents} per run${target && source.kind === "inline" ? ` · guideline: fewer than ${target}` : ""}`,
 		model: `${defaultModel.provider}/${defaultModel.id} · thinking ${thinking}`,
 		plan: scanPlan(prepared),
 		agentTools: defaultTools,
@@ -492,7 +492,8 @@ export async function launchWorkflow(params: LaunchParams, deps: LaunchDeps): Pr
 		prefixStaggerMs: cfg.prefixStaggerMs,
 		largeWorkflowAgents: cfg.largeWorkflowAgents,
 		largeWorkflowTokens: cfg.largeWorkflowTokens,
-		targetAgents: target,
+		// The size guideline is advice for scripts that the agent writes, not for saved workflows.
+		targetAgents: source.kind === "inline" ? target : undefined,
 		executor,
 		replay: prev?.replay,
 		resumedFrom: prev?.snapshot.id,

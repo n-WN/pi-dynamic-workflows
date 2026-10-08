@@ -7,7 +7,7 @@
  */
 
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { DialogQueue } from "./child-ui.ts";
+import { DialogQueue, upgradeDialogQueue } from "./child-ui.ts";
 import type { WorkflowRun } from "./run.ts";
 import type { QuestionRecord } from "./types.ts";
 
@@ -50,6 +50,8 @@ export function getRegistry(): Registry {
 		};
 		reg.dialogs.onChange = () => changed(reg as Registry);
 		g[KEY] = reg;
+	} else if (!(reg.dialogs instanceof DialogQueue)) {
+		upgradeDialogQueue(reg.dialogs);
 	}
 	return reg;
 }

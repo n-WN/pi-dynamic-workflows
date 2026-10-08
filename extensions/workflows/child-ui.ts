@@ -104,6 +104,22 @@ export class DialogQueue {
 	}
 }
 
+/**
+ * A /reload loads a newer copy of this file, but the registry (on globalThis) keeps
+ * the queue object of the older copy. Give that object the current methods and
+ * fields; it stays the same object, so its pending dialogs and sink stay intact.
+ */
+export function upgradeDialogQueue(q: DialogQueue): DialogQueue {
+	if (q instanceof DialogQueue) return q;
+	Object.setPrototypeOf(q, DialogQueue.prototype);
+	const fields = q as unknown as { remembered?: Map<string, DialogAnswer>; seen?: Map<string, number>; pending?: DialogRequest[]; tail?: Promise<unknown> };
+	fields.remembered ??= new Map();
+	fields.seen ??= new Map();
+	fields.pending ??= [];
+	fields.tail ??= Promise.resolve();
+	return q;
+}
+
 export interface ChildUiOptions {
 	parentUi: () => ExtensionUIContext | undefined;
 	dialogs: DialogQueue;

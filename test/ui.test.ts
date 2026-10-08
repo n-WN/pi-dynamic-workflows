@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { DialogQueue, type DialogRequest } from "../extensions/workflows/child-ui.ts";
+import { DialogQueue, type DialogRequest, upgradeDialogQueue } from "../extensions/workflows/child-ui.ts";
 import { formatSpan, parseTokens } from "../extensions/workflows/format.ts";
 import { describeValue, fitResult } from "../extensions/workflows/results.ts";
 import { prepareScript, scanPlan } from "../extensions/workflows/script.ts";
@@ -212,4 +212,23 @@ test("one answer for every agent of a run that asks the same question", async ()
 	await q.run(ask(4, "Allow bash: npm test?", "wf-2"), async () => undefined, () => undefined);
 	assert.equal(DialogQueue.keyOf({ kind: "input", title: "x", source: "s", runId: "wf-1" }), undefined);
 	assert.equal(shown, 3);
+});
+
+test("a dialog queue of an older copy of the extension gets the current methods", async () => {
+	// Shape of the queue before remembered answers existed.
+	class OldQueue {
+		tail: Promise<unknown> = Promise.resolve();
+		pending: DialogRequest[] = [];
+		sink?: (req: DialogRequest) => Promise<unknown>;
+	}
+	const old = new OldQueue();
+	old.sink = async () => true;
+	const q = upgradeDialogQueue(old as unknown as DialogQueue);
+	assert.equal(q, old as unknown);
+	assert.equal(q instanceof DialogQueue, true);
+	const req: DialogRequest = { kind: "confirm", title: "Allow?", source: "a", runId: "wf-1" };
+	assert.equal(await q.run(req, async () => undefined, () => undefined), true);
+	q.remember(req, true);
+	assert.equal(q.timesSeen(req), 1);
+	assert.equal(await q.run({ ...req, source: "b" }, async () => undefined, () => undefined), true);
 });

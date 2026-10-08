@@ -60,11 +60,23 @@ main pi session
   `new Date()`, `Math.random()`, other `export`s), and `vm.Script` checks the
   syntax. The script body keeps its line numbers (`export` becomes spaces, the
   wrapper uses `lineOffset: -1`), so every error shows the real line with a caret.
+- Before a run, the script must not contain invisible characters (C0/C1 controls,
+  bidi overrides, zero-width spaces, line separators): the approval dialog could
+  not show them, so they could hide code or text. Zero-width joiners stay allowed.
 - During a run: `Date.now()`, `new Date()`, and `Math.random()` throw (also when
-  reached through aliases). `random()` is seeded per run and the seed is kept on
-  relaunch. A script that waits on a promise that can never settle fails after
-  three idle seconds instead of hanging. A script that stops answering shows a
-  "script busy" warning.
+  reached through aliases), and the guards are not writable. `random()` is seeded
+  per run and the seed is kept on relaunch. A script that waits on a promise that
+  can never settle fails after three idle seconds instead of hanging (pending
+  `sleep()`/`setTimeout()` timers count as work). A script that stops answering
+  shows a "script busy" warning.
+- Hardening with no cost: the context has no code from strings (`eval`,
+  `new Function` throw), `Error.prepareStackTrace` and `captureStackTrace` are
+  locked, and `WebAssembly`, `SharedArrayBuffer`, `Atomics`, `WeakRef`, and
+  `FinalizationRegistry` are removed. This is defense in depth, not a security
+  boundary (see Known limits). Claude Code goes further (frozen intrinsics, every
+  `await` rewritten) because its permission system depends on the script not
+  escaping; it runs scripts on the main thread, so a busy loop after an `await`
+  blocks its UI. The worker thread here keeps the TUI free and makes stop final.
 
 ### 2.2 Agents
 
@@ -96,6 +108,29 @@ Each `agent()` attempt is an in-process `AgentSession` (pi SDK):
 - `isolation: "worktree"` creates `git worktree add` from HEAD, runs the agent
   there, commits its changes to a branch, and removes the worktree when nothing
   changed.
+- When many agents of a run ask the same select/confirm question, the human can
+  answer once for all of them (`tab` in the monitor, or a "for all agents of this
+  run" choice in the dialog from the second time on). The key is the run plus the
+  exact kind, title, message, and options, so a different command asks again.
+- A stall watchdog per run aborts an attempt without any sign of life (no session
+  event: token, tool start, tool update) for `stallMs` (default 10 minutes) and
+  starts it once more for free. Time spent waiting for the human does not count.
+  A second stall fails the agent (or uses `retries`).
+
+### 2.2a Token budget
+
+A run can have a hard token limit (tool argument `budget`, setting `tokenBudget`,
+or the approval dialog). At the limit no new agent starts; running agents finish.
+The decision comes when the script wants to start the next agent, so a script that
+ends without one never sees it (and is not stopped). Then the run pauses and asks
+the human to add 50%, double the budget, or stop. The
+question goes through the normal question path (task line, banner, `a`, dialogs),
+but only a human can answer it: the main agent gets a refusal, because the budget
+protects the human's money from the agent. Without a UI the run stops. Budget
+questions are not journaled, and script `ask()` calls have their own ordinal for
+replay, so a budget question never shifts the replay of the script's questions.
+The script sees `budget.tokenLimit`, `budget.remaining()`, and the Claude Code
+names `budget.total` and `budget.spent()`.
 
 ### 2.3 Replay (resume)
 
@@ -104,19 +139,27 @@ schema, model, thinking, tools, cwd, isolation, instructions, context), its call
 position, and two counters: `callAfter` (results the script had received when it
 made the call) and `endSeq` (when its own result reached the script).
 
-On relaunch, agents are matched by call position. A saved result is reused when:
+On relaunch, a call takes the first saved entry with the same key that no earlier
+call of this run took (so identical calls take the saved results in order). The
+saved result is reused when:
 
-1. the key is the same, and
-2. it completed, and
-3. every agent whose result had reached the script before this call (in the earlier
-   run) was reused in this run too.
+1. that entry completed, and
+2. every agent whose result had reached the script before that entry was called
+   (in the earlier run) was reused in this run too.
 
-Rule 3 is the happens-before relation of the script: a call can only depend on
-results that existed when it was made. It is a safe over-approximation of the data
-flow. A sequential chain therefore reruns from the first change (like Claude
-Code's prefix rule), but the parallel siblings of a failed agent keep their
-results, which the prefix rule would discard. Journals without the counters fall
-back to the prefix rule. `ask()` answers are replayed by position and text.
+Matching by key, not by position, matters because positions are not stable: in a
+`pipeline()`, stage-2 calls happen in the order in which stage-1 results arrive.
+Saved results arrive at once and in call order, so a position match would compare
+different calls and run completed agents again.
+
+Rule 2 is the happens-before relation of the script: a call can only depend on
+results, and on effects of agents, that existed when it was made. It is a safe
+over-approximation of the data flow, including hidden flow through files. A
+sequential chain therefore reruns from the first change (like Claude Code's
+prefix rule), but the parallel siblings of a failed agent keep their results,
+which the prefix rule would discard. Journals without the counters fall back to the
+prefix rule by position. `ask()` answers are replayed by their ordinal among the
+script's questions and their text.
 
 ### 2.4 Lifecycle
 
@@ -167,7 +210,9 @@ back to the prefix rule. `ask()` answers are replayed by position and text.
 | Resume rule | Prefix: the first changed or failed agent and every later agent rerun. | Happens-before: unchanged agents that did not depend on a rerun agent keep their results. |
 | Human input during a run | None (only permission prompts). | `ask()` plus permission prompts, answered inline in the monitor; messages to running agents (`m`); the main agent can answer and steer with `workflow_control`. |
 | Extra primitives | `agent`, `parallel`, `pipeline`, `phase`, `log`. | Also `race` (with cancellation), multi-stage `pipeline`, scoped `phase(title, fn)`, `env`, `budget`, `sleep`, seeded `random`/`shuffle`, `parallel` over objects. |
-| Agent options | Schema, model, isolation. | Also `tools`, `readOnly`, `cwd`, `thinking`, `instructions`, `context`, `timeout`, `maxTurns`, `retries`, `onError`, `cache`. |
+| Agent options | Schema, model, effort, isolation, agentType, disallowedTools, bashCommandClamp, stallMs. | Schema, model, `thinking`/`effort`, isolation, `disallowedTools`, `stallMs`, and also `tools`, `readOnly`, `cwd`, `instructions`, `context`, `timeout`, `maxTurns`, `retries`, `onError`, `cache`. `agentType` and `bashCommandClamp` give an error that says what to use. |
+| Pipeline stages | Every stage gets `(prev, item, index)`; a throwing stage gives `null`. | The same signature; a throwing stage rejects the call (the script has a bug; fix it and resume). |
+| Token budget | The turn's "+500k" target is a hard ceiling; `agent()` throws when it is spent. | A per-run limit; at the limit the run pauses and the human decides. |
 | Tool for the agent | `Workflow`; results arrive as task notifications. | `workflow` plus `workflow_control`; `wait: true` for a result in the same call. |
 | Effort | `/effort ultracode` sets xhigh effort. | `/ultracode` changes only the planning; pi's thinking level stays yours. |
 | Usage limits | Waits for a subscription limit reset. | Not available in pi; a failed agent can be relaunched. |

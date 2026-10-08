@@ -152,6 +152,7 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 		[
 			`Workflow "${run.name}" started in the background (run ${run.id}).`,
 			...notes.map((n) => `Note: ${n}`),
+			run.tokenLimit ? `Token budget: ${formatTokens(run.tokenLimit)} tokens for all agents. At the limit the run pauses and the user decides.` : "",
 			run.phases.length ? `Phases: ${run.phases.map((p) => p.title).join(" → ")}` : "",
 			`Script: ${run.scriptPath}`,
 			`Agent transcripts: ${run.transcriptDir}`,
@@ -212,6 +213,12 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 				Type.String({ description: "Run ID of an earlier run in this session to relaunch. Completed agents with unchanged inputs return their saved results." }),
 			),
 			wait: Type.Optional(Type.Boolean({ description: "Wait for the run to end and return its result in this call. Default: false (the run goes on in the background)." })),
+			budget: Type.Optional(
+				Type.Union([Type.Number(), Type.String()], {
+					description:
+						'Hard token limit for the whole run (all agents together), such as 2000000 or "2M". At the limit no new agent starts and the user decides. Set it when the user gives a limit.',
+				}),
+			),
 		}),
 		renderCall: (args, theme, context) => renderWorkflowCall(args as WorkflowToolArgs, theme, context),
 		renderResult: (result, options, theme, context) =>
@@ -385,6 +392,12 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 					const r = pick();
 					if (typeof r === "string") return text(r, true);
 					if (params.question === undefined || params.answer === undefined) return text("Pass question (number) and answer (text).", true);
+					if (r.questions[params.question]?.kind === "budget") {
+						return text(
+							`Question ${params.question} asks to raise the token budget of ${r.id}. Only the user can answer it (in /workflows, or in the dialog). Tell the user that the run waits for this decision.`,
+							true,
+						);
+					}
 					return r.answerQuestion(params.question, params.answer, "agent")
 						? text(`Answered question ${params.question} of ${r.id}.`)
 						: text(`Question ${params.question} of ${r.id} does not wait for an answer.`, true);

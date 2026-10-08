@@ -148,6 +148,12 @@ in the monitor:
 - Your extensions run in the agents too. When one of them asks (a permission gate,
   for example), the dialog shows with the run and the agent in its title. When the
   monitor is open, you answer it there.
+- When many agents ask the same question (the same permission prompt, for example),
+  you can give one answer for all agents of the run: `tab` in the monitor, or the
+  "for all agents of this run" choice that the dialog offers from the second time on.
+  The run log notes each answer that it gives this way. It works for select and
+  confirm dialogs, not for free text and not for `ask()`.
+- A run that reaches its token budget asks whether to raise it or stop (see Cost).
 
 When a run ends, a result card appears in the conversation and the agent continues
 with the result.
@@ -177,15 +183,15 @@ return audits.filter(Boolean)
 
 | Global | Purpose |
 |---|---|
-| `agent(prompt, opts)` | One subagent with a fresh context. Options: `label`, `phase`, `schema`, `model`, `thinking`, `tools`, `readOnly`, `cwd`, `isolation: "worktree"`, `instructions`, `context`, `timeout`, `maxTurns`, `retries`, `onError`, `cache`. |
+| `agent(prompt, opts)` | One subagent with a fresh context. Options: `label`, `phase`, `schema`, `model`, `thinking` (or `effort`), `tools`, `readOnly`, `disallowedTools`, `cwd`, `isolation: "worktree"`, `instructions`, `context`, `timeout`, `maxTurns`, `retries`, `stallMs`, `onError`, `cache`. |
 | `parallel(tasks, { concurrency })` | Run at the same time, wait for all. |
-| `pipeline(items, ...stages)` | Each item goes through the stages on its own. |
+| `pipeline(items, ...stages)` | Each item goes through the stages on its own. Every stage gets `(previous, item, index)`; stage 1 gets the item as `previous`. |
 | `race(tasks, predicate)` | First acceptable result wins; the other agents stop. |
 | `phase(title, fn?)` | Group agents in the progress view (scoped per branch). |
 | `log()`, `console.*` | Notes for the human. |
 | `ask(question, opts)` | Ask the human; default when nobody can answer. |
-| `args`, `env`, `budget` | Input, environment (tools, model, cwd), live counts. |
-| `sleep(ms)`, `random()`, `shuffle()` | Helpers; `random()` is seeded per run. |
+| `args`, `env`, `budget` | Input, environment (tools, model, cwd), live counts and the token limit (`budget.remaining()`). |
+| `sleep(ms)`, `setTimeout()`, `random()`, `shuffle()` | Helpers; `random()` is seeded per run. |
 
 Scripts have no `import`/`require`, file system, or shell. `Date.now()`,
 `new Date()`, and `Math.random()` throw, so that a relaunched run repeats the same
@@ -194,11 +200,15 @@ calls.
 ## Resume and iterate
 
 Every run saves its script. The agent can edit `scriptPath` and run it again, or
-pass `resumeFromRunId` to relaunch a stopped or failed run. A completed agent with
-unchanged inputs returns its saved result. An agent runs again when its inputs
-changed, when it had no result, or when the script called it after the result of
-an agent that runs again. So parallel siblings of a failed agent keep their
-results, and a sequential chain runs again from the first change.
+pass `resumeFromRunId` to relaunch a stopped or failed run. Calls are matched by
+their inputs (prompt and options), not by their position: a pipeline whose items
+reach a stage in another order still finds its saved results. A completed agent
+with unchanged inputs returns its saved result. An agent runs again when its
+inputs changed, when it had no result, or when the earlier run started it after the
+result of an agent that runs again (it could depend on what that agent did). So
+parallel siblings of a failed agent keep their results, and a sequential chain runs
+again from the first change. When a run was already relaunched, the launch says so:
+resume from the newest relaunch to keep all results.
 
 ## Settings
 
@@ -224,11 +234,13 @@ results, and a sequential chain runs again from the first change.
 | `structuredOutputRetries` | 5 | Tries for a valid schema result |
 | `largeWorkflowAgents`, `largeWorkflowTokens` | 25, 1.5M | "Large workflow" warning thresholds |
 | `resultMaxChars` | 30000 | Result size in the message; the full result is in `result.json` |
+| `tokenBudget` | none | Default hard token limit per run, such as `"2M"` (also `PI_WORKFLOW_TOKEN_BUDGET`) |
+| `stallMinutes` | 10 | An agent without any activity for this long stops and starts again once; `0`: off |
 | `enabled` | `true` | `false` turns workflows off (also `PI_DISABLE_WORKFLOWS=1`) |
 
 Environment variables: `PI_WORKFLOW_MAX_CONCURRENT_AGENTS`, `PI_WORKFLOW_MAX_AGENTS`,
 `PI_WORKFLOW_PREFIX_STAGGER_MS`, `PI_WORKFLOW_MAX_STRUCTURED_OUTPUT_RETRIES`,
-`PI_DISABLE_WORKFLOWS`.
+`PI_WORKFLOW_TOKEN_BUDGET`, `PI_DISABLE_WORKFLOWS`.
 
 ## Files
 
@@ -257,9 +269,17 @@ terminal. There is no approval dialog without a UI.
 
 A workflow can use many more tokens than normal work: each agent has its own
 system prompt and context. Start with a small slice of the task, use
-`sizeGuideline`, give simple stages a smaller model (`model` option or
-`agentModel`), and stop a run in `/workflows` when it grows. The monitor shows the
-tokens of every agent.
+`sizeGuideline`, give simple stages a smaller model (`model` option, a phase
+`model`, or `agentModel`), and stop a run in `/workflows` when it grows. The monitor
+shows the tokens of every agent.
+
+A token budget is a hard limit for one run (all agents together). Set it in the
+approval dialog (`b`), with `tokenBudget`, or let the agent pass `budget` when you
+name a limit. The task line and the monitor show `used / limit`. At the limit no new
+agent starts (running agents finish), and the run asks you: add 50%, double it, or
+stop. Only you can answer that question; the main agent cannot raise your budget.
+Without a UI (print mode) the run stops at the limit, and a relaunch keeps the
+completed results.
 
 ## Tests
 

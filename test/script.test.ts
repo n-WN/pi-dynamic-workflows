@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { findSchemaContradiction, toToolParameters, validate } from "../extensions/workflows/schema.ts";
-import { peekMetaName, prepareScript, renameScript, ScriptError } from "../extensions/workflows/script.ts";
+import { peekMetaName, peekMetaPhases, prepareScript, renameScript, ScriptError } from "../extensions/workflows/script.ts";
 
 const ok = (body: string) => prepareScript(`export const meta = { name: "x", description: "d" }\n${body}`, "s.js");
 const fails = (src: string, re: RegExp) => {
@@ -95,4 +95,23 @@ test("validation errors are readable", () => {
 	assert.equal(r.ok, false);
 	if (!r.ok) assert.match(r.errors.join(" "), /\/n: must be number/);
 	assert.equal(validate({ type: "string" }, "a").ok, true);
+});
+
+test("hidden characters are rejected with their position", () => {
+	const src = `export const meta = { name: "t", description: "d" }\nconst x = "a\u202Eb"\nreturn x`;
+	assert.throws(
+		() => prepareScript(src, "t.js"),
+		(err: unknown) => err instanceof ScriptError && /invisible character \(U\+202E\)/.test(err.message) && err.format("t.js").includes("t.js:2"),
+	);
+	// A leading byte order mark is fine; zero-width joiners in emoji are fine.
+	assert.doesNotThrow(() => prepareScript(`\uFEFFexport const meta = { name: "t", description: "d" }\nreturn "👨‍👩‍👧"`, "t.js"));
+});
+
+test("meta.phases objects are normalized; whenToUse and title are checked", () => {
+	const p = prepareScript(`export const meta = { name: "t", description: "d", whenToUse: "big audits", phases: [{ title: "A", detail: "first" }, "B"] }\nreturn 1`, "t.js");
+	assert.deepEqual(p.meta.phases, ["A", "B"]);
+	assert.deepEqual(p.meta.phaseInfo, [{ title: "A", detail: "first", model: undefined }, { title: "B" }]);
+	assert.equal(p.meta.whenToUse, "big audits");
+	assert.throws(() => prepareScript(`export const meta = { name: "t", description: "d", phases: [{ detail: "no title" }] }\nreturn 1`, "t.js"), /meta.phases must be/);
+	assert.deepEqual(peekMetaPhases(`export const meta = { name: "t", description: "d", phases: [{ title: "A", model: "m" }, { title: "B" }] }`), ["A", "B"]);
 });

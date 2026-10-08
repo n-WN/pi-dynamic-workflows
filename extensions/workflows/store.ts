@@ -19,6 +19,8 @@ export interface SavedWorkflow {
 	name: string;
 	description: string;
 	argsHint?: string;
+	/** meta.whenToUse. */
+	whenToUse?: string;
 	argsSchema?: Record<string, unknown>;
 	phases?: string[];
 	path: string;
@@ -75,6 +77,7 @@ function fromMeta(meta: WorkflowMeta, path: string, scope: WorkflowScope): Saved
 		name: meta.name,
 		description: meta.description,
 		argsHint: meta.argsHint,
+		whenToUse: meta.whenToUse,
 		argsSchema: meta.args,
 		phases: meta.phases,
 		path,

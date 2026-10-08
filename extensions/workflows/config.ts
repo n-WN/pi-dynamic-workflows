@@ -9,6 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname, join } from "node:path";
+import { parseTokens } from "./format.ts";
 
 export type ApprovalPolicy = "ask" | "first" | "never";
 export type SizeGuideline = "small" | "medium" | "large" | "unrestricted";
@@ -44,6 +45,10 @@ export interface WorkflowConfig {
 	resultMaxChars: number;
 	/** Show a compact progress line on stderr in print mode. */
 	printProgress: boolean;
+	/** Default hard token limit per run (all agents). 0: none. The tool call and the approval dialog can set one. */
+	tokenBudget: number;
+	/** Abort an agent that shows no activity for this many minutes, and start it again once. 0: off. */
+	stallMinutes: number;
 }
 
 export const SIZE_TARGETS: Record<SizeGuideline, number | undefined> = {
@@ -88,6 +93,8 @@ export function defaults(): WorkflowConfig {
 		largeWorkflowTokens: 1_500_000,
 		resultMaxChars: 30_000,
 		printProgress: true,
+		tokenBudget: 0,
+		stallMinutes: 10,
 	};
 }
 
@@ -142,6 +149,10 @@ function apply(cfg: WorkflowConfig, src: Record<string, unknown> | undefined): v
 	cfg.largeWorkflowTokens = num(src.largeWorkflowTokens, 1, 1e12) ?? cfg.largeWorkflowTokens;
 	cfg.resultMaxChars = num(src.resultMaxChars, 1000, 1_000_000) ?? cfg.resultMaxChars;
 	if (typeof src.printProgress === "boolean") cfg.printProgress = src.printProgress;
+	if (src.tokenBudget === 0 || src.tokenBudget === "0") cfg.tokenBudget = 0;
+	else cfg.tokenBudget = parseTokens(src.tokenBudget) ?? cfg.tokenBudget;
+	const stall = typeof src.stallMinutes === "string" ? Number(src.stallMinutes) : src.stallMinutes;
+	if (typeof stall === "number" && Number.isFinite(stall) && stall >= 0 && stall <= 24 * 60) cfg.stallMinutes = stall;
 }
 
 export function loadConfig(piSettings: Record<string, unknown> | undefined, agentDir: string): WorkflowConfig {
@@ -156,6 +167,7 @@ export function loadConfig(piSettings: Record<string, unknown> | undefined, agen
 	cfg.prefixStaggerMs = num(env.PI_WORKFLOW_PREFIX_STAGGER_MS, 0, 60_000) ?? cfg.prefixStaggerMs;
 	cfg.structuredOutputRetries = num(env.PI_WORKFLOW_MAX_STRUCTURED_OUTPUT_RETRIES, 1, 20) ?? cfg.structuredOutputRetries;
 	cfg.maxAgents = num(env.PI_WORKFLOW_MAX_AGENTS, 1, 100_000) ?? cfg.maxAgents;
+	if (env.PI_WORKFLOW_TOKEN_BUDGET !== undefined) cfg.tokenBudget = parseTokens(env.PI_WORKFLOW_TOKEN_BUDGET) ?? 0;
 	return cfg;
 }
 

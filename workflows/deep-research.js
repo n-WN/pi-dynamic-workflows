@@ -1,7 +1,14 @@
 export const meta = {
   name: "deep-research",
   description: "Research a question across many web sources, cross-check the key claims, and return a cited report",
-  phases: ["Plan", "Search", "Read", "Verify", "Report"],
+  phases: [
+    { title: "Plan", detail: "split the question into search angles" },
+    { title: "Search", detail: "one search agent per angle" },
+    { title: "Read", detail: "read the best sources, one agent per source" },
+    { title: "Verify", detail: "independent agents try to refute each key claim" },
+    { title: "Report", detail: "write the cited report" },
+  ],
+  whenToUse: "a question that needs current web sources and cross-checked claims",
   args: {
     anyOf: [
       { type: "string", minLength: 3 },

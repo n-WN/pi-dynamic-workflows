@@ -22,7 +22,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { DialogAnswer, DialogRequest } from "../child-ui.ts";
+import { type DialogAnswer, DialogQueue, type DialogRequest } from "../child-ui.ts";
 import { countAgents, elapsedOf, formatClock, formatCost, formatDuration, formatSpan, formatTokens, oneLine, plural, previewJson } from "../format.ts";
 import { getRegistry, onRegistryChange, runsOfSession } from "../registry.ts";
 import { WorkflowRun } from "../run.ts";
@@ -75,7 +75,7 @@ type Mode =
 	| { kind: "normal" }
 	| { kind: "help" }
 	| { kind: "save"; runId: string; input: Input; scope: "project" | "personal"; error?: string }
-	| { kind: "answer"; target: Interaction; sel: number; input?: Input }
+	| { kind: "answer"; target: Interaction; sel: number; input?: Input; remember?: boolean }
 	| { kind: "confirm-stop"; runId: string }
 	| { kind: "confirm-stop-agent"; runId: string; agentId: number }
 	| { kind: "steer"; runId: string; agentId: number; input: Input };
@@ -144,6 +144,20 @@ function agentWait(a: AgentRecord, now: number): number {
 
 function clamp(n: number, lo: number, hi: number): number {
 	return Math.max(lo, Math.min(hi, n));
+}
+
+function metaOf(r: RunLike): RunSnapshot["meta"] {
+	return isLive(r) ? r.prepared.meta : r.meta;
+}
+
+/** "418k tokens", or "418k / 2M tokens" in a warning color near the budget. */
+function tokensText(theme: Theme, r: RunLike, word = "tokens"): string {
+	const used = r.usage.totalTokens;
+	const limit = r.tokenLimit;
+	if (!limit) return theme.fg("muted", `${formatTokens(used)} ${word}`);
+	const share = used / limit;
+	const color = share >= 1 ? "error" : share >= 0.8 ? "warning" : "muted";
+	return theme.fg(color, `${formatTokens(used)} / ${formatTokens(limit)} ${word}`);
 }
 
 const HELP: Record<View["kind"], Array<[string, string]>> = {
@@ -533,13 +547,25 @@ export class WorkflowMonitor implements Component {
 		return opts;
 	}
 
-	private finishAnswer(it: Interaction, answer: DialogAnswer | null, cancelled: boolean): void {
+	private finishAnswer(it: Interaction, answer: DialogAnswer | null, cancelled: boolean, remember = false): void {
 		if (it.kind === "dialog") {
 			const i = this.dialogQueue.indexOf(it);
 			if (i >= 0) this.dialogQueue.splice(i, 1);
-			if (cancelled) it.resolve(it.req.kind === "confirm" ? false : undefined);
-			else if (it.req.kind === "confirm") it.resolve(answer === "Yes");
-			else it.resolve(answer === null ? undefined : (answer as string));
+			const value: DialogAnswer = cancelled
+				? it.req.kind === "confirm"
+					? false
+					: undefined
+				: it.req.kind === "confirm"
+					? answer === "Yes"
+					: answer === null
+						? undefined
+						: (answer as string);
+			// The same answer for every agent of this run that asks the same question.
+			if (remember && !cancelled) {
+				getRegistry().dialogs.remember(it.req, value);
+				this.setFlash(`Every agent of this run that asks "${oneLine(it.req.title, 60)}" gets this answer.`);
+			}
+			it.resolve(value);
 		} else if (!cancelled) {
 			it.run.answerQuestion(it.q.id, typeof answer === "string" ? answer : null, "human");
 		}
@@ -574,12 +600,14 @@ export class WorkflowMonitor implements Component {
 			return;
 		}
 		const options = this.answerOptions(it);
-		if (matchesKey(data, "up") || data === "k") mode.sel = Math.max(0, mode.sel - 1);
+		const remember = !!mode.remember;
+		if (matchesKey(data, "tab") && it.kind === "dialog" && DialogQueue.keyOf(it.req)) mode.remember = !mode.remember;
+		else if (matchesKey(data, "up") || data === "k") mode.sel = Math.max(0, mode.sel - 1);
 		else if (matchesKey(data, "down") || data === "j") mode.sel = Math.min(options.length - 1, mode.sel + 1);
-		else if (matchesKey(data, "enter")) this.finishAnswer(it, options[mode.sel] ?? null, false);
-		else if (/^[1-9]$/.test(data) && options[Number(data) - 1] !== undefined) this.finishAnswer(it, options[Number(data) - 1], false);
-		else if (data === "y" && it.kind === "dialog" && it.req.kind === "confirm") this.finishAnswer(it, "Yes", false);
-		else if (data === "n" && it.kind === "dialog" && it.req.kind === "confirm") this.finishAnswer(it, "No", false);
+		else if (matchesKey(data, "enter")) this.finishAnswer(it, options[mode.sel] ?? null, false, remember);
+		else if (/^[1-9]$/.test(data) && options[Number(data) - 1] !== undefined) this.finishAnswer(it, options[Number(data) - 1], false, remember);
+		else if (data === "y" && it.kind === "dialog" && it.req.kind === "confirm") this.finishAnswer(it, "Yes", false, remember);
+		else if (data === "n" && it.kind === "dialog" && it.req.kind === "confirm") this.finishAnswer(it, "No", false, remember);
 		this.tui.requestRender();
 	}
 
@@ -708,6 +736,7 @@ export class WorkflowMonitor implements Component {
 							["↑↓", "select"],
 							["enter", "answer"],
 							["1-9", "pick"],
+							...(this.mode.target.kind === "dialog" && DialogQueue.keyOf(this.mode.target.req) ? ([["tab", "same for all agents"]] as Array<[string, string]>) : []),
 							["esc", this.mode.target.kind === "dialog" ? "deny" : "close"],
 						]);
 			case "confirm-stop":
@@ -789,6 +818,12 @@ export class WorkflowMonitor implements Component {
 					const sel = i === m.sel;
 					lines.push(`${sel ? th.fg("accent", "❯") : " "} ${th.fg("dim", `${i + 1}.`)} ${sel ? th.fg("accent", o) : o}`);
 				});
+				if (it.kind === "dialog" && DialogQueue.keyOf(it.req)) {
+					const n = getRegistry().dialogs.timesSeen(it.req);
+					lines.push(
+						`${m.remember ? th.fg("accent", "☑") : th.fg("dim", "☐")} ${m.remember ? "Same answer" : th.fg("muted", "Same answer")} for every agent of this run that asks this${n > 1 ? th.fg("dim", ` (asked ${n} times so far)`) : ""} ${th.fg("dim", "· tab")}`,
+					);
+				}
 			}
 			return lines;
 		}
@@ -1013,7 +1048,7 @@ export class WorkflowMonitor implements Component {
 			const c = countAgents(sel.agents);
 			const cost = formatCost(sel.usage.cost);
 			const words = countWords(th, c);
-			lines.push([words, th.fg("muted", `${formatTokens(sel.usage.totalTokens)} tokens${cost ? ` · ${cost}` : ""}`)].filter(Boolean).join(th.fg("dim", " · ")));
+			lines.push([words, `${tokensText(th, sel)}${cost ? th.fg("muted", ` · ${cost}`) : ""}`].filter(Boolean).join(th.fg("dim", " · ")));
 			const lastLog = sel.logs[sel.logs.length - 1];
 			if (lastLog) lines.push(th.fg("dim", `log: ${oneLine(lastLog.text, inner - 6)}`));
 			if (statusOf(sel) === "failed" && sel.error) lines.push(th.fg("error", oneLine(sel.error, inner)));
@@ -1039,7 +1074,7 @@ export class WorkflowMonitor implements Component {
 		const cost = formatCost(run.usage.cost);
 		const words = countWords(th, c) || th.fg("dim", "no agents yet");
 		const gauge = live ? slotsGauge(th, c.active, run.limits.maxConcurrency) : "";
-		const tokens = th.fg("muted", `${formatTokens(run.usage.totalTokens)} tokens${cost ? ` · ${cost}` : ""}`);
+		const tokens = `${tokensText(th, run)}${cost ? th.fg("muted", ` · ${cost}`) : ""}`;
 		// The status words stay whole; the tokens, then the slots, give way on a narrow screen.
 		const right = [gauge, tokens].filter(Boolean).join("   ");
 		const rightFit = visibleWidth(words) + visibleWidth(right) + 2 <= inner ? right : visibleWidth(words) + visibleWidth(gauge) + 2 <= inner ? gauge : "";
@@ -1058,6 +1093,10 @@ export class WorkflowMonitor implements Component {
 		const logRoom = Math.min(8, run.logs.length);
 		const tableRoom = Math.max(3, height - lines.length - (logRoom ? logRoom + 2 : 0));
 		lines.push(...this.phaseTable(run, phases, v.sel, inner, tableRoom, now));
+		const info = metaOf(run).phaseInfo?.find((p) => p.title === phases[v.sel]?.title);
+		if (info && (info.detail || info.model)) {
+			lines.push(th.fg("dim", oneLine(`${info.title}: ${[info.detail ?? "", info.model ? `model ${info.model}` : ""].filter(Boolean).join(" · ")}`, inner)));
+		}
 
 		const logs = run.logs.slice(-Math.max(0, height - lines.length - 2));
 		if (logs.length) {

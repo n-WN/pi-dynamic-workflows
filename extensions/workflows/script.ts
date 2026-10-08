@@ -6,7 +6,7 @@
 
 import vm from "node:vm";
 import { lineColumn, significant, type Token, TokenizeError, tokenize } from "./tokenizer.ts";
-import type { WorkflowMeta } from "./types.ts";
+import type { PhaseInfo, WorkflowMeta } from "./types.ts";
 
 export const SCRIPT_WRAPPER_PREFIX = "(async function __workflow__() {\n";
 export const SCRIPT_WRAPPER_SUFFIX = "\n})";
@@ -221,10 +221,24 @@ export function validateMeta(meta: Record<string, unknown>, src: string, metaOff
 		fail("meta.description is required: one line that says what the workflow does.");
 	}
 	if (meta.phases !== undefined) {
-		if (!Array.isArray(meta.phases) || meta.phases.some((p) => typeof p !== "string" || !p.trim())) {
-			fail('meta.phases must be an array of non-empty strings, such as ["Find", "Fix", "Verify"].');
+		// Strings, or objects { title, detail?, model? }. Titles go to meta.phases, objects to meta.phaseInfo.
+		const PHASE_HINT = 'meta.phases must be an array of titles, such as ["Find", "Fix", "Verify"], or of objects such as { title: "Find", detail: "list the files", model: "provider/small-model" }.';
+		if (!Array.isArray(meta.phases)) fail(PHASE_HINT);
+		const info: PhaseInfo[] = [];
+		for (const p of meta.phases as unknown[]) {
+			if (typeof p === "string" && p.trim()) info.push({ title: p.trim() });
+			else if (p && typeof p === "object" && !Array.isArray(p) && typeof (p as PhaseInfo).title === "string" && (p as PhaseInfo).title.trim()) {
+				const o = p as Record<string, unknown>;
+				if (o.detail !== undefined && typeof o.detail !== "string") fail(`meta.phases: detail of "${o.title}" must be a string.`);
+				if (o.model !== undefined && (typeof o.model !== "string" || !o.model.trim())) fail(`meta.phases: model of "${o.title}" must be a model name.`);
+				info.push({ title: (o.title as string).trim(), detail: o.detail as string | undefined, model: (o.model as string | undefined)?.trim() });
+			} else fail(PHASE_HINT);
 		}
+		meta.phases = info.map((p) => p.title);
+		if (info.some((p) => p.detail || p.model)) meta.phaseInfo = info;
 	}
+	if (meta.title !== undefined && typeof meta.title !== "string") fail("meta.title must be a string.");
+	if (meta.whenToUse !== undefined && typeof meta.whenToUse !== "string") fail("meta.whenToUse must be a string.");
 	if (meta.args !== undefined && (typeof meta.args !== "object" || meta.args === null || Array.isArray(meta.args))) {
 		fail("meta.args must be a JSON Schema object that describes the args value.");
 	}
@@ -275,9 +289,28 @@ const FORBIDDEN: ForbiddenRule[] = [
 	},
 ];
 
+/**
+ * Characters that a terminal does not show (controls, bidi overrides, zero-width
+ * spaces). The approval dialog could not show them, so a script cannot hide code
+ * or text behind them. Zero-width joiners stay allowed (emoji, some scripts).
+ */
+const HIDDEN_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B\u200E\u200F\u202A-\u202E\u2028\u2029\u2060-\u2064\u2066-\u2069\uFEFF]/;
+
 export function prepareScript(source: string, filename = "workflow.js"): PreparedScript {
 	if (typeof source !== "string" || !source.trim()) {
 		throw new ScriptError("meta", "The script is empty. It must begin with: export const meta = { name, description }");
+	}
+	// A byte order mark at the start is harmless; elsewhere it is hidden text.
+	if (source.charCodeAt(0) === 0xfeff) source = source.slice(1);
+	const hidden = HIDDEN_CHARS.exec(source);
+	if (hidden) {
+		const code = hidden[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, "0");
+		throw errorAt(
+			"forbidden",
+			source,
+			hidden.index,
+			`The script contains an invisible character (U+${code}). The approval dialog cannot show it, so a hidden character could change what the script does. Remove it (write \\u${code} in a string if you need it).`,
+		);
 	}
 	let tokens: Token[];
 	try {
@@ -378,6 +411,9 @@ export function peekMetaPhases(source: string | undefined): string[] | undefined
 	if (!source) return undefined;
 	const m = source.match(/export\s+const\s+meta\s*=\s*\{[\s\S]*?\bphases\s*:\s*\[([^\]]*)\]/);
 	if (!m) return undefined;
+	// Phase objects: take their titles; plain lists: every string.
+	const titles = [...m[1].matchAll(/\btitle\s*:\s*["'`]([^"'`]+)["'`]/g)].map((x) => x[1]);
+	if (titles.length) return titles;
 	return [...m[1].matchAll(/["'`]([^"'`]+)["'`]/g)].map((x) => x[1]);
 }
 

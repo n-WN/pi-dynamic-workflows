@@ -19,6 +19,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { BUILTIN_TOOLS, PiAgentExecutor } from "./agent-runner.ts";
 import { createChildUi } from "./child-ui.ts";
 import { SIZE_TARGETS, type WorkflowConfig } from "./config.ts";
+import { parseTokens } from "./format.ts";
 import { CONTROL_TOOL, WORKFLOW_TOOL } from "./prompts.ts";
 import { addRun, changed, getRegistry, serializeApproval } from "./registry.ts";
 import { type ReplayData, WorkflowRun } from "./run.ts";
@@ -35,6 +36,8 @@ export interface LaunchParams {
 	args?: unknown;
 	resumeFromRunId?: string;
 	wait?: boolean;
+	/** Hard token limit for the run, such as 2000000 or "2M". */
+	budget?: number | string;
 }
 
 export type LaunchOutcome =
@@ -248,6 +251,8 @@ async function approve(deps: LaunchDeps, info: ApprovalInfo, source: { text: str
 							script: edited,
 							lineCount: prepared.lineCount,
 							plan: scanPlan(prepared),
+							phaseInfo: prepared.meta.phaseInfo,
+							title: prepared.meta.title,
 							edited: true,
 						});
 					} catch (err) {
@@ -272,6 +277,22 @@ export async function launchWorkflow(params: LaunchParams, deps: LaunchDeps): Pr
 		const p = loadPrevious(deps, params.resumeFromRunId.trim());
 		if ("error" in p) return { kind: "error", message: p.error };
 		prev = p;
+	}
+	const lineage: string[] = [];
+	if (prev) {
+		const later = loadPastRuns(agentDir, sessionId, new Set())
+			.filter((r) => r.resumedFrom === prev?.snapshot.id && r.startedAt > (prev?.snapshot.startedAt ?? 0))
+			.sort((a, b) => b.startedAt - a.startedAt);
+		if (later[0]) {
+			lineage.push(
+				`Run ${prev.snapshot.id} was already relaunched as ${later[0].id} (${later[0].status}). That run has the results of both; to keep them, resume from ${later[0].id} instead.`,
+			);
+		}
+	}
+	let budgetValue: number | undefined;
+	if (params.budget !== undefined && params.budget !== null && params.budget !== "") {
+		budgetValue = params.budget === 0 || params.budget === "0" ? 0 : parseTokens(params.budget);
+		if (budgetValue === undefined) return { kind: "error", message: `budget must be a token amount such as 2000000, "500k", or "2M" (got ${JSON.stringify(params.budget)}).` };
 	}
 	let text: string;
 	let source: WorkflowSource;
@@ -319,7 +340,7 @@ export async function launchWorkflow(params: LaunchParams, deps: LaunchDeps): Pr
 		return { kind: "error", message: formatScriptError(err, scriptPath), scriptPath };
 	}
 	let args = params.args !== undefined ? params.args : prev?.snapshot.args;
-	const notes: string[] = [];
+	const notes: string[] = [...lineage];
 	// Some models send objects as JSON strings. Parse them unless meta.args takes that string.
 	if (typeof args === "string") {
 		const t = args.trim();
@@ -399,6 +420,8 @@ export async function launchWorkflow(params: LaunchParams, deps: LaunchDeps): Pr
 							changed();
 						},
 						onUnsupported: (what) => run.log("warn", `Agent #${rec.id} (${rec.label}): ${what}`),
+						onRemembered: (title, answer) =>
+							run.log("info", `Agent #${rec.id} (${rec.label}): "${title}" got the answer ${JSON.stringify(answer)} that you gave for all agents of this run.`),
 					})
 			: undefined,
 		bridgeExec: toolCtx
@@ -427,10 +450,13 @@ export async function launchWorkflow(params: LaunchParams, deps: LaunchDeps): Pr
 		model: `${defaultModel.provider}/${defaultModel.id} · thinking ${thinking}`,
 		plan: scanPlan(prepared),
 		agentTools: defaultTools,
+		phaseInfo: prepared.meta.phaseInfo,
+		title: prepared.meta.title,
+		budget: budgetValue ?? cfg.tokenBudget,
 		named: source.kind !== "inline",
 		edited: false,
 		resumeFrom: prev?.snapshot.id,
-		notes: [],
+		notes: [...lineage],
 	};
 	const src = { text, prepared };
 	const decision = await approve(deps, info, src, scriptPath);
@@ -471,6 +497,8 @@ export async function launchWorkflow(params: LaunchParams, deps: LaunchDeps): Pr
 		replay: prev?.replay,
 		resumedFrom: prev?.snapshot.id,
 		foreground: !!params.wait,
+		tokenBudget: info.budget,
+		stallMs: Math.round(cfg.stallMinutes * 60_000),
 	});
 	addRun(run);
 	run.start();

@@ -145,7 +145,13 @@ class FakeExecutor implements AgentExecutor {
 const RESEARCH = `export const meta = {
   name: "deep-research",
   description: "Research a question across many web sources, cross-check the key claims, and return a cited report",
-  phases: ["Scope", "Search", "Fetch", "Verify", "Synthesize"],
+  phases: [
+    { title: "Scope", detail: "plan the research angles" },
+    { title: "Search", detail: "one search agent per angle", model: "ai-gateway-anthropic/claude-fable-5-1" },
+    { title: "Fetch", detail: "read each source" },
+    { title: "Verify", detail: "check each claim with a stronger model" },
+    { title: "Synthesize", detail: "write the report" },
+  ],
 }
 
 phase("Scope")
@@ -176,7 +182,7 @@ return await agent("Summarize findings")
 
 const runDirs: string[] = [];
 
-function makeRun(id: string, source: string, args: unknown, maxConcurrency: number): WorkflowRun {
+function makeRun(id: string, source: string, args: unknown, maxConcurrency: number, tokenBudget?: number): WorkflowRun {
 	const dir = mkdtempSync(join(tmpdir(), "wf-preview-run-"));
 	runDirs.push(dir);
 	const scriptPath = join(dir, "script.js");
@@ -198,6 +204,7 @@ function makeRun(id: string, source: string, args: unknown, maxConcurrency: numb
 		largeWorkflowAgents: 25,
 		largeWorkflowTokens: 1_500_000,
 		executor: new FakeExecutor(),
+		tokenBudget,
 	});
 	addRun(run);
 	return run;
@@ -297,7 +304,7 @@ const small = makeRun("wf-small1", SMALL, undefined, 4);
 small.start();
 await small.whenEnded();
 
-const research = makeRun("wf-res001", RESEARCH, { question: "How big is the market for agent tooling?" }, 4);
+const research = makeRun("wf-res001", RESEARCH, { question: "How big is the market for agent tooling?" }, 4, 180_000);
 
 // Approval dialog for the research script.
 const info: ApprovalInfo = {
@@ -313,6 +320,8 @@ const info: ApprovalInfo = {
 	model: "ai-gateway-anthropic/claude-fable-5-1 · thinking medium",
 	plan: scanPlan(research.prepared),
 	agentTools: ["read", "bash", "edit", "write"],
+	phaseInfo: research.prepared.meta.phaseInfo,
+	budget: 2_000_000,
 	named: false,
 	edited: false,
 	notes: [],
@@ -320,6 +329,11 @@ const info: ApprovalInfo = {
 for (const width of [80, 120]) {
 	const d = new ApprovalDialog(fakeTui, theme, info, () => {});
 	capture(`approval-${width}`, width, renderComponent(d, width));
+}
+{
+	const d = new ApprovalDialog(fakeTui, theme, { ...info, budget: 0 }, () => {});
+	d.handleInput("b");
+	capture("approval-budget-input", 100, renderComponent(d, 100));
 }
 
 research.start();

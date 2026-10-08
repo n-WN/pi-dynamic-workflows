@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { formatSpan } from "../extensions/workflows/format.ts";
+import { DialogQueue, type DialogRequest } from "../extensions/workflows/child-ui.ts";
+import { formatSpan, parseTokens } from "../extensions/workflows/format.ts";
 import { describeValue, fitResult } from "../extensions/workflows/results.ts";
 import { prepareScript, scanPlan } from "../extensions/workflows/script.ts";
 import type { AgentRecord, AgentStatus } from "../extensions/workflows/types.ts";
@@ -176,4 +177,39 @@ test("formatSpan", () => {
 	assert.equal(formatSpan(42_500), "42s");
 	assert.equal(formatSpan(62_000), "1:02");
 	assert.equal(formatSpan(3_723_000), "1:02:03");
+});
+
+test("parseTokens", () => {
+	assert.equal(parseTokens("500k"), 500_000);
+	assert.equal(parseTokens("2M"), 2_000_000);
+	assert.equal(parseTokens("1.5m tokens"), 1_500_000);
+	assert.equal(parseTokens(" 750000 "), 750_000);
+	assert.equal(parseTokens(1234.4), 1234);
+	assert.equal(parseTokens("lots"), undefined);
+	assert.equal(parseTokens("0"), undefined);
+});
+
+test("one answer for every agent of a run that asks the same question", async () => {
+	const q = new DialogQueue();
+	let shown = 0;
+	q.sink = async (req) => {
+		shown++;
+		return req.kind === "confirm" ? true : "Allow";
+	};
+	const ask = (agentId: number, title = "Allow bash: npm test?", runId = "wf-1"): DialogRequest => ({ kind: "confirm", title, source: `a${agentId}`, runId, agentId });
+	const first = ask(1);
+	assert.equal(await q.run(first, async () => undefined, () => undefined), true);
+	assert.equal(shown, 1);
+	q.remember(first, true);
+	const remembered: unknown[] = [];
+	const second = { ...ask(2), onRemembered: (a: unknown) => remembered.push(a) };
+	assert.equal(await q.run(second, async () => undefined, () => undefined), true);
+	assert.equal(shown, 1, "the second agent got the remembered answer");
+	assert.deepEqual(remembered, [true]);
+	assert.equal(q.timesSeen(second), 2);
+	// Another question, another run, or free text: asked again.
+	await q.run(ask(3, "Allow bash: rm -rf build?"), async () => undefined, () => undefined);
+	await q.run(ask(4, "Allow bash: npm test?", "wf-2"), async () => undefined, () => undefined);
+	assert.equal(DialogQueue.keyOf({ kind: "input", title: "x", source: "s", runId: "wf-1" }), undefined);
+	assert.equal(shown, 3);
 });

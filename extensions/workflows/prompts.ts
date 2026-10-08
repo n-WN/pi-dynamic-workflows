@@ -23,29 +23,32 @@ The call returns at once with a run ID (unless wait is true). The final result a
 SCRIPT (pass "script" inline, or "scriptPath", or the "name" of a saved or bundled workflow):
 export const meta = { name: "kebab-name", description: "One line", phases: ["Find", "Fix", "Verify"] }
 ...then plain JavaScript with top-level await. The return value is the workflow result: keep it compact (JSON data or a markdown report).
-meta must be the first statement and contain literal values only.
+meta must be the first statement and contain literal values only. A phase can also be { title, detail?, model? }; model is the default model of that phase's agents.
 
 GLOBALS
 - agent(prompt, opts?) -> Promise<string | object | null>. Starts one subagent with a fresh context. Resolves to its final text, or to parsed JSON when opts.schema is set. Resolves to null when the agent fails or is stopped (opts.onError: "throw" throws instead).
-  opts: label (short display name), phase, schema (JSON Schema of the result), model ("provider/id" or a model id), thinking (off|minimal|low|medium|high|xhigh|max), tools (tool names; default: the session's built-in tools), readOnly (read/grep/find/ls only), cwd, isolation: "worktree" (own git worktree; resolves to { output, worktree }), instructions (extra text), context (data added to the prompt), timeout (seconds), maxTurns, retries, cache (false: never reuse a saved result).
-- parallel(tasks, { concurrency }?) -> Promise<any[]>. Runs functions at the same time and waits for all: parallel(files.map(f => () => agent(...))). An object of functions gives an object of results.
-- pipeline(items, stage1, stage2?, ...) -> Promise<any[]>. Sends each item through the stages on its own, with no barrier between stages. Stage 1 gets (item, index); later stages get (previousValue, item, index). A null result stops that item.
+  opts: label (short display name), phase, schema (JSON Schema of the result), model ("provider/id" or a model id), thinking or effort (off|minimal|low|medium|high|xhigh|max), tools (tool names; default: the session's built-in tools), readOnly (read/grep/find/ls only), disallowedTools (tools to take away), cwd, isolation: "worktree" (own git worktree; resolves to { output, worktree }), instructions (extra text), context (data added to the prompt), timeout (seconds), maxTurns, retries, stallMs (no activity for this long: abort and start again once; default 10 minutes), cache (false: never reuse a saved result).
+- parallel(tasks, { concurrency }?) -> Promise<any[]>. Runs functions at the same time and waits for all: parallel(files.map(f => () => agent(...))). An object of functions gives an object of results. A failed agent gives null; a task that throws rejects the call (fix the script and resume: completed agents keep their results).
+- pipeline(items, stage1, stage2?, ...) -> Promise<any[]>. Sends each item through the stages on its own, with no barrier between stages. Every stage gets (previousValue, item, index); for stage 1, previousValue is the item. A null result stops that item. Prefer pipeline over parallel-then-parallel when later stages do not need all earlier results.
 - race(tasks, predicate?) -> Promise<{ index, value } | null>. The first result that passes the predicate (default: not null) wins; the other tasks' agents stop.
 - phase(title, fn?). Groups the agents that follow (or only those started inside fn) under a title in the progress view.
 - log(...values) and console.log: progress notes for the human.
 - ask(question, { options?, default?, timeout? }) -> Promise<string | null>. Asks the human and waits. Returns the default when no human can answer.
-- args (the input value), env ({ cwd, runId, model, tools, defaultTools, gitRepo }), budget (live: agentsStarted, agentsRemaining, agentsRunning, tokens, maxConcurrency, targetAgents), sleep(ms), random() (seeded), shuffle(list).
+- args (the input value), env ({ cwd, runId, model, tools, defaultTools, gitRepo }), budget (live: agentsStarted, agentsRemaining, agentsRunning, tokens, tokenLimit, maxConcurrency, targetAgents; total, spent(), remaining() for the token limit), sleep(ms), setTimeout/clearTimeout, random() (seeded), shuffle(list).
 
 RULES
 - Agents do not see this conversation. Each prompt must be self-contained: give paths, criteria, and the output format.
 - Use schema whenever later code reads fields of a result. Keep results small: return findings, not file contents.
 - The script cannot read files, run commands, or import modules (no import/require). Agents do that work.
-- Date.now(), new Date() without arguments, and Math.random() throw (they would break replay). Pass time in args; use random().
+- Date.now(), new Date() without arguments, Math.random(), and eval throw (they would break replay). Pass time in args; use random().
+- Token budget: when the call (budget) or the user sets one, the run pauses at the limit and the user decides. Do not branch on token counts: a relaunch reuses results without tokens.
 - Limits: ${cfg.maxConcurrency} agents at once, ${cfg.maxAgents} agents per run, ${cfg.maxItems} items per parallel/pipeline/race call. Size: ${sizeAdvice(cfg)}.
 - Good shapes: fan-out then synthesize; adversarial verification (independent agents try to refute each finding); generate then filter; tournament; loop until a check passes or makes no progress; classify then act. Read the workflow-authoring skill for patterns and examples.
 
 ITERATE
-Every run saves its script and returns scriptPath. To fix a script, edit that file and call again with scriptPath. Pass resumeFromRunId to relaunch a stopped or failed run (add scriptPath to relaunch an edited script): completed agents with unchanged inputs return their saved results; agents that changed or had no result run again, and so do agents the script called after one of those results.`;
+Every run saves its script and returns scriptPath. To fix a script, edit that file and call again with scriptPath. Pass resumeFromRunId to relaunch a stopped or failed run (add scriptPath to relaunch an edited script). Calls are matched by their inputs (prompt and options), not by their order: a completed agent with unchanged inputs returns its saved result; agents that changed or had no result run again, and so do agents that the earlier run started after the result of an agent that runs again.
+
+If you know Claude Code workflows: the API is close. Differences: parallel/pipeline reject when a task throws (Claude Code gives null); phase() applies only to its own branch of parallel/pipeline; there are race(), ask(), sleep(), random(); there is no workflow() nesting, agentType, or bashCommandClamp.`;
 }
 
 export const WORKFLOW_TOOL_SNIPPET = "Run a dynamic workflow script that orchestrates many subagents in the background";
@@ -68,14 +71,15 @@ Actions:
 - steer (runId, agent, message): send a correction or extra instruction to one running agent.
 Do not use status in a loop to wait; the result arrives as a <workflow-result> message.`;
 
-export function workflowsSection(cfg: WorkflowConfig, saved: Array<{ name: string; description: string; argsHint?: string }>): string {
+export function workflowsSection(cfg: WorkflowConfig, saved: Array<{ name: string; description: string; argsHint?: string; whenToUse?: string }>): string {
 	const lines = [
 		`Dynamic workflows: ${sizeAdvice(cfg)}. Up to ${cfg.maxConcurrency} agents run at once.`,
 	];
 	if (saved.length) {
 		lines.push("Saved workflows (run with workflow({ name, args })):");
 		for (const w of saved.slice(0, 40)) {
-			lines.push(`- ${w.name}${w.argsHint ? ` ${w.argsHint.slice(0, 40)}` : ""}: ${w.description.replace(/\s+/g, " ").slice(0, 160)}`);
+			const when = w.whenToUse ? ` Use when: ${w.whenToUse.replace(/\s+/g, " ").slice(0, 160)}` : "";
+			lines.push(`- ${w.name}${w.argsHint ? ` ${w.argsHint.slice(0, 40)}` : ""}: ${w.description.replace(/\s+/g, " ").slice(0, 160)}${when}`);
 		}
 	}
 	return lines.join("\n");

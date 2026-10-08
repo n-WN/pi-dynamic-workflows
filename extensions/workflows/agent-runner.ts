@@ -140,6 +140,15 @@ export class PiAgentExecutor implements AgentExecutor {
 			}
 		}
 		tools = tools.filter((t) => !ORCHESTRATION_TOOLS.has(t));
+		if (o.disallowedTools?.length) {
+			// A deny list on top of the tool list. A name that is not a tool is an error: a typo
+			// must not leave a tool on that the script wanted off.
+			const known = new Set([...BUILTIN_TOOLS, ...ctx.parentTools.keys()]);
+			const unknown = o.disallowedTools.filter((t) => !known.has(t));
+			if (unknown.length) throw new Error(`disallowedTools: unknown tool ${unknown.map((t) => `"${t}"`).join(", ")}. Tools: ${[...known].join(", ")}`);
+			const deny = new Set(o.disallowedTools);
+			tools = tools.filter((t) => !deny.has(t));
+		}
 
 		let schema: Record<string, unknown> | undefined;
 		if (o.schema !== undefined) {
@@ -328,6 +337,7 @@ export class PiAgentExecutor implements AgentExecutor {
 				if (abortReason) return aborted();
 
 				unsubscribe = session.subscribe((ev) => {
+					hooks.onActivity?.();
 					onEvent(rec, ev, hooks, {
 						onTurn: () => {
 							if (data.maxTurns && rec.turns >= data.maxTurns && !submitted) abort("max_turns");

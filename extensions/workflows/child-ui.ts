@@ -25,6 +25,8 @@ export interface DialogRequest {
 	questionId?: number;
 	/** Aborts when the asking agent ends; the dialog then closes without an answer. */
 	signal?: AbortSignal;
+	/** Called when a remembered answer of this run answered the dialog without showing it. */
+	onRemembered?: (answer: DialogAnswer) => void;
 }
 
 export type DialogAnswer = string | boolean | undefined;
@@ -39,13 +41,53 @@ export class DialogQueue {
 	 */
 	sink?: (req: DialogRequest, fallback: () => Promise<DialogAnswer>) => Promise<DialogAnswer>;
 	onChange?: () => void;
+	/** Answers that the human gave for all agents of a run that ask the same question. */
+	private readonly remembered = new Map<string, DialogAnswer>();
+	/** How often each question came up per run. */
+	private readonly seen = new Map<string, number>();
+
+	/**
+	 * Key of a question that may get one answer for a whole run: a select or confirm
+	 * dialog of an agent (not an ask() of the script, not free text). Same run, same
+	 * kind, title, message, and options.
+	 */
+	static keyOf(req: DialogRequest): string | undefined {
+		if (req.questionId !== undefined || !req.runId || (req.kind !== "select" && req.kind !== "confirm")) return undefined;
+		return JSON.stringify([req.runId, req.kind, req.title, req.message ?? "", req.options ?? []]);
+	}
+
+	/** Give `answer` to this question and to the same question of every other agent of the run. */
+	remember(req: DialogRequest, answer: DialogAnswer): void {
+		const key = DialogQueue.keyOf(req);
+		if (key !== undefined && answer !== undefined) this.remembered.set(key, answer);
+	}
+
+	timesSeen(req: DialogRequest): number {
+		const key = DialogQueue.keyOf(req);
+		return key === undefined ? 0 : (this.seen.get(key) ?? 0);
+	}
+
+	private recall(req: DialogRequest): { answer: DialogAnswer } | undefined {
+		const key = DialogQueue.keyOf(req);
+		if (key === undefined || !this.remembered.has(key)) return undefined;
+		const answer = this.remembered.get(key);
+		req.onRemembered?.(answer);
+		return { answer };
+	}
 
 	run(req: DialogRequest, viaUi: (ui: ExtensionUIContext) => Promise<DialogAnswer>, ui: () => ExtensionUIContext | undefined): Promise<DialogAnswer> {
+		const key = DialogQueue.keyOf(req);
+		if (key !== undefined) this.seen.set(key, (this.seen.get(key) ?? 0) + 1);
+		const known = this.recall(req);
+		if (known) return Promise.resolve(known.answer);
 		this.pending.push(req);
 		this.onChange?.();
 		const next = this.tail.then(async () => {
 			try {
 				if (req.signal?.aborted) return undefined;
+				// The human may have answered the same question for the whole run meanwhile.
+				const meanwhile = this.recall(req);
+				if (meanwhile) return meanwhile.answer;
 				const direct = async () => {
 					const target = ui();
 					return target ? await viaUi(target) : undefined;
@@ -74,6 +116,8 @@ export interface ChildUiOptions {
 	signal?: AbortSignal;
 	/** An extension used a UI feature that agents do not have (shown in the run log). */
 	onUnsupported?: (what: string) => void;
+	/** A remembered answer of the run answered a dialog of this agent (shown in the run log). */
+	onRemembered?: (title: string, answer: DialogAnswer) => void;
 }
 
 function anySignal(signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
@@ -86,30 +130,52 @@ function anySignal(signals: Array<AbortSignal | undefined>): AbortSignal | undef
 export function createChildUi(opts: ChildUiOptions): ExtensionUIContext {
 	const prefix = `[${opts.source}] `;
 	const dialog = async <T extends DialogAnswer>(
-		req: Omit<DialogRequest, "source" | "runId" | "agentId">,
-		viaUi: (ui: ExtensionUIContext) => Promise<T>,
+		base: Omit<DialogRequest, "source" | "runId" | "agentId">,
+		viaUi: (ui: ExtensionUIContext, req: DialogRequest) => Promise<T>,
 	): Promise<T> => {
-		opts.onWaiting(`${req.kind}: ${req.title}`);
+		const req: DialogRequest = {
+			...base,
+			source: opts.source,
+			runId: opts.runId,
+			agentId: opts.agentId,
+			signal: opts.signal,
+			onRemembered: (answer) => opts.onRemembered?.(base.title, answer),
+		};
+		opts.onWaiting(`${base.kind}: ${base.title}`);
 		try {
-			return (await opts.dialogs.run(
-				{ ...req, source: opts.source, runId: opts.runId, agentId: opts.agentId, signal: opts.signal },
-				viaUi as (ui: ExtensionUIContext) => Promise<DialogAnswer>,
-				opts.parentUi,
-			)) as T;
+			return (await opts.dialogs.run(req, (ui) => viaUi(ui, req) as Promise<DialogAnswer>, opts.parentUi)) as T;
 		} finally {
 			opts.onWaiting(undefined);
 		}
 	};
+	const SAME = "Same answer for all agents of this run…";
+	const allOf = "for all agents of this run";
 	let lastNotify = 0;
 	const ui: ExtensionUIContext = {
 		select: (title, options, dialogOpts) =>
-			dialog({ kind: "select", title, options }, (p) =>
-				p.select(prefix + title, options, { ...dialogOpts, signal: anySignal([dialogOpts?.signal, opts.signal]) }),
-			) as Promise<string | undefined>,
+			dialog({ kind: "select", title, options }, async (p, req) => {
+				const o = { ...dialogOpts, signal: anySignal([dialogOpts?.signal, opts.signal]) };
+				// From the second time the same question comes up in this run: offer one answer for all agents.
+				const times = opts.dialogs.timesSeen(req);
+				if (times < 2) return p.select(prefix + title, options, o);
+				const pick = await p.select(`${prefix}${title} (asked ${times} times in this run)`, [...options, SAME], o);
+				if (pick !== SAME) return pick;
+				const again = await p.select(`${prefix}${title} (the answer goes to all agents of this run)`, options, o);
+				if (again !== undefined) opts.dialogs.remember(req, again);
+				return again;
+			}) as Promise<string | undefined>,
 		confirm: (title, message, dialogOpts) =>
-			dialog({ kind: "confirm", title, message }, (p) =>
-				p.confirm(prefix + title, message, { ...dialogOpts, signal: anySignal([dialogOpts?.signal, opts.signal]) }),
-			).then((v) => v === true),
+			dialog({ kind: "confirm", title, message }, async (p, req) => {
+				const o = { ...dialogOpts, signal: anySignal([dialogOpts?.signal, opts.signal]) };
+				const times = opts.dialogs.timesSeen(req);
+				if (times < 2) return p.confirm(prefix + title, message, o);
+				const choices = ["Yes", "No", `Yes, ${allOf}`, `No, ${allOf}`];
+				const pick = await p.select(`${prefix}${title}${message ? ` — ${message}` : ""} (asked ${times} times in this run)`, choices, o);
+				if (pick === undefined) return false;
+				const yes = pick.startsWith("Yes");
+				if (pick.endsWith(allOf)) opts.dialogs.remember(req, yes);
+				return yes;
+			}).then((v) => v === true),
 		input: (title, placeholder, dialogOpts) =>
 			dialog({ kind: "input", title, placeholder }, (p) =>
 				p.input(prefix + title, placeholder, { ...dialogOpts, signal: anySignal([dialogOpts?.signal, opts.signal]) }),

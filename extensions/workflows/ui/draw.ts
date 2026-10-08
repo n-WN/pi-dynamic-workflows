@@ -422,16 +422,17 @@ export function hints(theme: Theme, items: Array<[string, string]>): string {
  * Key hints that fit in `width`. The first items are the most important; the last
  * item (back or close) always stays. When items are left out, "? keys" is added.
  */
-export function hintsFit(theme: Theme, items: Array<[string, string]>, width: number): string {
+export function hintsFit(theme: Theme, items: Array<[string, string]>, width: number, keysHint = true): string {
 	if (visibleWidth(hints(theme, items)) <= width || items.length <= 1) return hints(theme, items);
 	const last = items[items.length - 1];
 	const head = items.slice(0, -1);
+	const more: Array<[string, string]> = keysHint ? [["?", "keys"]] : [];
 	while (head.length) {
 		head.pop();
-		const line = hints(theme, [...head, ["?", "keys"], last]);
+		const line = hints(theme, [...head, ...more, last]);
 		if (visibleWidth(line) <= width) return line;
 	}
-	return hints(theme, [["?", "keys"], last]);
+	return hints(theme, [...more, last]);
 }
 
 export function section(theme: Theme, title: string): string {

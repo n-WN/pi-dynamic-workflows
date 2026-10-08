@@ -21,6 +21,8 @@ export const meta = {
   name: "audit-routes",                      // kebab-case, required
   description: "Audit route handlers for missing auth checks", // one line, required
   phases: ["Discover", "Audit", "Verify"],   // optional plan, shown before the run
+  // or objects: [{ title: "Audit", detail: "one agent per file", model: "provider/small-model" }]
+  whenToUse: "an audit of many route files",  // optional, listed for saved workflows
   args: { type: "string" },                  // optional JSON Schema of args (saved workflows)
   argsHint: "<dir>",                         // optional hint for the /name command
 }
@@ -49,6 +51,11 @@ Rules for `meta`: it is the first statement, and it holds only literal values (s
 numbers, booleans, null, arrays, objects). No variables, calls, spreads, or template
 substitutions. The body is plain JavaScript with top-level `await` and `return`.
 
+A phase object `{ title, detail?, model? }` shows its detail before the run and in the
+monitor. Its `model` is the default model of the agents in that phase (an agent's own
+`model` option wins). The script must not contain invisible characters (controls, bidi
+overrides, zero-width spaces): the approval dialog could not show them.
+
 ## API
 
 ### agent(prompt, opts?) → Promise<string | object | null>
@@ -65,9 +72,10 @@ it throws an `AgentError` (`err.agentId`, `err.reason`) instead.
 | `phase` | string | Phase for this agent (overrides `phase()`). |
 | `schema` | JSON Schema | Structured result. The agent must call `submit_result` with matching JSON; it gets up to 5 tries. Contradictory schemas (a required key that `additionalProperties: false` forbids, an empty `enum`, `minItems > maxItems`) fail at once. |
 | `model` | string | `"provider/id"`, a model id, or part of a name. Default: the session model. Use a smaller model for simple stages. |
-| `thinking` | string | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Default: the session level. |
+| `thinking` | string | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Default: the session level. `effort` is another name for it. |
 | `tools` | string[] | Tool allowlist. Default: the session's built-in tools (`env.defaultTools`). `[]` gives a pure reasoning agent. `env.tools` lists what exists, including MCP tools (`mcp__server__tool`). |
 | `readOnly` | boolean | Shortcut for `tools: ["read", "grep", "find", "ls"]`. |
+| `disallowedTools` | string[] | Tools to take away from the list above, such as `["bash"]`. An unknown name is an error. |
 | `cwd` | string | Working directory, relative to the session directory. |
 | `isolation` | `"worktree"` | The agent works in its own git worktree from HEAD. The call then resolves to `{ output, worktree: { path, branch, changed, diffStat } }`. Changes are committed to `branch`; merge them in a later step. Uncommitted changes of the main tree are not in the worktree. |
 | `instructions` | string | Extra text appended to the prompt. |
@@ -75,6 +83,7 @@ it throws an `AgentError` (`err.agentId`, `err.reason`) instead.
 | `timeout` | number | Seconds. The attempt fails when it passes. |
 | `maxTurns` | number | Stop the agent after this many turns. |
 | `retries` | number | Extra attempts after a provider error or timeout. Default 0 (pi already retries transient API errors). |
+| `stallMs` | number | Milliseconds without any activity (no token, no tool update) after which the attempt stops and starts again once. Default: 10 minutes (`workflows.stallMinutes`). Raise it for agents that run long silent commands; `0` turns it off. |
 | `onError` | `"null"` or `"throw"` | Default `"null"`. |
 | `cache` | boolean | `false`: never reuse a saved result on resume. |
 
@@ -83,14 +92,20 @@ it throws an `AgentError` (`err.agentId`, `err.reason`) instead.
 Runs tasks at the same time and waits for all. A task is a function (usually
 `() => agent(...)`) or a value. An object of tasks gives an object of results:
 `const { a, b } = await parallel({ a: () => agent(...), b: () => agent(...) })`.
-If a task function throws, `parallel` rejects. Failed agents give `null` entries.
+Failed agents give `null` entries. If a task function throws (a bug in the script), the
+call rejects; fix the script and resume: completed agents keep their results.
 
 ### pipeline(items, stage1, stage2?, ..., { concurrency }?) → Promise<any[]>
 
 Sends each item through the stages on its own: item 3 can be in stage 2 while item 7 is
-still in stage 1. There is no barrier between stages. Stage 1 gets `(item, index)`; later
-stages get `(previousValue, item, index)`. A stage result of `null` or `undefined` stops
-that item; its entry is `null`. Results keep the item order.
+still in stage 1. There is no barrier between stages. Every stage gets
+`(previousValue, item, index)`; for stage 1, `previousValue` is the item itself, so
+`(file) => agent(...)` works as a first stage. A stage result of `null` or `undefined`
+stops that item; its entry is `null`. Results keep the item order.
+
+Default to `pipeline()` for multi-stage work. Use `parallel()` and then another
+`parallel()` only when a stage needs all results of the stage before it (a dedup or a
+ranking over all items): the barrier makes every item wait for the slowest one.
 
 ### race(tasks, predicate?) → Promise<{ index, value } | null>
 
@@ -120,14 +135,23 @@ Use it for real decisions only, such as "Apply 14 fixes now?".
 
 - `args`: the input value (frozen), or `undefined`.
 - `env`: `{ cwd, runId, name, sessionId, model, thinking, tools, defaultTools, gitRepo, platform }`.
-- `budget`: live counts: `agentsStarted`, `agentsRemaining`, `agentsRunning`, `agentsDone`, `agentsFailed`, `tokens`, `cost`, `maxConcurrency`, `targetAgents`.
-- `sleep(ms)`, `random()` (seeded per run, so a relaunch repeats it), `shuffle(list)`.
+- `budget`: live counts: `agentsStarted`, `agentsRemaining`, `agentsRunning`, `agentsDone`, `agentsFailed`, `tokens`, `tokenLimit`, `tokensRemaining`, `cost`, `maxConcurrency`, `targetAgents`. For the token limit also `budget.total`, `budget.spent()`, `budget.remaining()` (`Infinity` without a limit).
+- `sleep(ms)`, `setTimeout(fn, ms, ...args)` / `clearTimeout(id)`, `random()` (seeded per run, so a relaunch repeats it), `shuffle(list)`.
 
 ### Not available
 
-`import`, `require`, file system, shell, network, timers other than `sleep`. Agents do
-that work. `Date.now()`, `new Date()` without arguments, and `Math.random()` throw, so
-that a relaunched run repeats the same `agent()` calls. Pass a timestamp in `args`.
+`import`, `require`, `eval`, `new Function`, file system, shell, network. Agents do that
+work. `Date.now()`, `new Date()` without arguments, and `Math.random()` throw, so that a
+relaunched run repeats the same `agent()` calls. Pass a timestamp in `args`.
+
+### Token budget
+
+A run can have a hard token limit for all its agents: the `budget` argument of the
+`workflow` tool (`budget: "2M"`), the user's setting, or the approval dialog. At the
+limit no new agent starts, and the run asks the user to raise the budget or stop (without
+a user it stops). Only the user can raise it. Set a budget when the user names a limit. In
+the script, read `budget.remaining()` to choose a smaller plan, but do not branch on it in
+ways that must repeat on a relaunch: a relaunch reuses results without spending tokens.
 
 ### Limits
 
@@ -237,14 +261,17 @@ if (go !== "yes") return { plan, applied: false }
 - Every run saves its script; the launch result gives `scriptPath`. To fix a script, edit
   that file and call `workflow({ scriptPath })`.
 - `workflow({ resumeFromRunId })` relaunches a stopped or failed run in the same session.
-  Agents are matched by call order. A completed agent with unchanged inputs returns its
-  saved result. An agent runs again when its inputs changed, when it had no result, or when
-  the script called it after the result of an agent that runs again (the script could have
-  used that result). So parallel siblings of a failed agent keep their results, and a
-  sequential chain runs again from the first change. Combine with `scriptPath` to resume an
-  edited script.
-- For determinism, keep the order of `agent()` calls stable: do not branch on `budget`
-  or on timing.
+  Calls are matched by their inputs (prompt and options), not by their order, so a
+  pipeline whose items now arrive in another order still finds its results. Identical
+  calls take the saved results in order. A completed agent with unchanged inputs returns
+  its saved result. An agent runs again when its inputs changed, when it had no result, or
+  when the earlier run started it after the result of an agent that now runs again (it
+  could depend on what that agent did). So parallel siblings of a failed agent keep their
+  results, and a sequential chain runs again from the first change. Combine with
+  `scriptPath` to resume an edited script.
+- Resume from the newest relaunch: it has the results of the runs before it.
+- For determinism, build prompts only from `args`, earlier results, and constants: do not
+  put token counts or timing into prompts.
 
 ## Errors you may see
 
@@ -255,8 +282,26 @@ if (go !== "yes") return { plan, applied: false }
 - `schema contradiction: ...`: fix the schema; the agent did not start.
 - `The script waits on a promise that can never settle`: an awaited promise has nothing
   that can resolve it.
+- `no activity for 10m (stalled)`: the agent showed no sign of life twice. Give agents
+  that run long silent commands a larger `stallMs`.
+- `option "agentType" does not exist here`: that is an option of another runtime; the
+  message says what to use instead.
+- `The script contains an invisible character (U+202E)`: remove it, or write it as an
+  escape (`\u202E`) inside a string.
 - A run result with `Agents without a result`: these agents returned `null`. Check their
   errors, then resume or adjust prompts.
+
+## Coming from Claude Code workflows
+
+The API is close, and scripts usually run as they are. The differences:
+
+- `parallel()` and `pipeline()` reject when a task function throws; Claude Code gives
+  `null` for that item. A failed agent gives `null` in both.
+- `phase()` applies to its own branch of `parallel()`/`pipeline()`; you do not need
+  `opts.phase` to avoid races.
+- Extra: `race()`, `ask()`, `sleep()`, `random()`, `shuffle()`, `env`, `readOnly`,
+  `tools`, `instructions`, `context`, `timeout`, `maxTurns`, `retries`, `cache`.
+- Not here: `workflow()` nesting, `agentType`, `bashCommandClamp`.
 
 ## Watching a run
 

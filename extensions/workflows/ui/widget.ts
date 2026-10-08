@@ -145,12 +145,23 @@ export class WorkflowWidget implements Component {
 				{ text: phaseText, priority: 7, shrink: (w) => truncateToWidth(phaseText, w, "…"), min: 8 },
 				{ text: progressBar(th, c, barWidth), priority: 3, shrink: (w) => progressBar(th, c, w), min: 6 },
 				{ text: counters(th, c), priority: 8 },
-				{ text: th.fg("dim", `${formatTokens(run.usage.totalTokens)} tok`), priority: 4 },
+				this.tokensPart(run),
 				{ text: th.fg("dim", elapsed), priority: 6 },
 				{ text: extras.join(" "), priority: 9 },
 			],
 			key,
 		);
+	}
+
+	/** Tokens, against the budget when there is one; near the limit it gets a color and stays visible. */
+	private tokensPart(run: WorkflowRun): { text: string; priority: number } {
+		const th = this.theme;
+		const used = run.usage.totalTokens;
+		const limit = run.tokenLimit;
+		if (!limit) return { text: th.fg("dim", `${formatTokens(used)} tok`), priority: 4 };
+		const share = used / limit;
+		const color = share >= 1 ? "error" : share >= 0.8 ? "warning" : "dim";
+		return { text: th.fg(color, `${formatTokens(used)}/${formatTokens(limit)} tok`), priority: share >= 0.8 ? 8 : 4 };
 	}
 
 	invalidate(): void {}

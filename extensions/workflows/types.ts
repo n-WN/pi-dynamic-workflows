@@ -1,10 +1,24 @@
 /** Shared types of the workflow runtime. All run state is plain JSON data. */
 
+export interface PhaseInfo {
+	title: string;
+	/** What the phase does (shown before the run and in the monitor). */
+	detail?: string;
+	/** Default model of the agents in this phase. */
+	model?: string;
+}
+
 export interface WorkflowMeta {
 	name: string;
 	description: string;
-	/** Planned phase titles, in order. */
+	/** Optional display title. */
+	title?: string;
+	/** When to use this workflow (listed for saved workflows). */
+	whenToUse?: string;
+	/** Planned phase titles, in order. meta.phases may also hold { title, detail?, model? } objects; they are normalized to titles here. */
 	phases?: string[];
+	/** The phase objects of meta.phases (title, detail, model). */
+	phaseInfo?: PhaseInfo[];
 	/** JSON Schema of the args value. */
 	args?: Record<string, unknown>;
 	/** Short hint for the slash command, such as "<question>". */
@@ -32,6 +46,10 @@ export interface AgentCallOptions {
 	retries?: number;
 	onError?: "null" | "throw";
 	cache?: boolean;
+	/** Tools to take away from the agent's tool list. */
+	disallowedTools?: string[];
+	/** Abort and retry once when the agent shows no activity for this many milliseconds. */
+	stallMs?: number;
 }
 
 export type AgentStatus =
@@ -130,6 +148,8 @@ export interface AgentRecord {
 	fromRunId?: string;
 	/** Messages that the human or the main agent sent to this agent while it ran. */
 	steers?: Array<{ t: number; by: "human" | "agent"; text: string }>;
+	/** Attempts that the run aborted because the agent showed no activity. */
+	stalls?: number;
 	/** How many agent results the script had received when it made this call (replay dependencies). */
 	callAfter?: number;
 	/** Position of this agent in the order in which results reached the script. */
@@ -164,6 +184,10 @@ export interface QuestionRecord {
 	phase: string;
 	/** Who answered: the human in the UI, the main agent, or the default. */
 	answeredBy?: "human" | "agent" | "default" | "replay";
+	/** "budget": the run asks to raise its token budget (only a human answers it). Default: an ask() of the script. */
+	kind?: "script" | "budget";
+	/** Ordinal among the script's ask() calls (replay matches by it). */
+	seq?: number;
 }
 
 export type WorkflowSourceKind = "inline" | "file" | "saved" | "bundled";
@@ -213,6 +237,8 @@ export interface RunSnapshot {
 	limits: { maxConcurrency: number; maxAgents: number; maxItems: number };
 	/** Agents the size guideline aims for (advice, not a cap). */
 	targetAgents?: number;
+	/** Hard token limit of the run (it can grow when the human raises it). */
+	tokenLimit?: number;
 }
 
 /** One line of journal.jsonl: the outcome of an agent call or a question, for replay. */

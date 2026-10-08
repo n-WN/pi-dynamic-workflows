@@ -9,7 +9,7 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { countAgents, defaultLabel, elapsedOf } from "./format.ts";
+import { countAgents, defaultLabel, elapsedOf, formatDuration, formatTokens, parseTokens } from "./format.ts";
 import { type CallScope, ScriptHost, type SerializedError } from "./sandbox.ts";
 import type { PreparedScript } from "./script.ts";
 import {
@@ -31,7 +31,7 @@ import {
 
 export const DEFAULT_PHASE = "Agents";
 
-export type AbortReason = "stopped" | "restart" | "timeout" | "cancelled" | "run-ended";
+export type AbortReason = "stopped" | "restart" | "timeout" | "cancelled" | "run-ended" | "stalled";
 
 export type AttemptOutcome =
 	| { ok: true; value: unknown; worktree?: WorktreeInfo }
@@ -50,6 +50,8 @@ export interface AttemptHooks {
 	onUsage(usage: Partial<UsageTotals>): void;
 	/** The first response token arrived (releases agents held for the prompt cache). */
 	onFirstToken(): void;
+	/** Any sign of life (a streamed token, a tool update). The stall watchdog uses it. */
+	onActivity?(): void;
 }
 
 export interface AttemptHandle {
@@ -96,6 +98,8 @@ export interface ReplayData {
 	questions: Map<number, Extract<JournalEntry, { type: "question" }>>;
 }
 
+type AgentEntry = Extract<JournalEntry, { type: "agent" }>;
+
 export interface WorkflowRunInit {
 	id: string;
 	prepared: PreparedScript;
@@ -117,6 +121,10 @@ export interface WorkflowRunInit {
 	replay?: ReplayData;
 	resumedFrom?: string;
 	foreground?: boolean;
+	/** Hard token limit for the run (all agents). 0 or undefined: none. */
+	tokenBudget?: number;
+	/** Abort an attempt that shows no activity for this long, and start it again once. 0: off. */
+	stallMs?: number;
 }
 
 interface PendingCall {
@@ -128,6 +136,8 @@ interface PendingCall {
 interface LiveAttempt {
 	handle: AttemptHandle;
 	reason?: AbortReason;
+	/** Last sign of life of the attempt (stall watchdog). */
+	lastActivity: number;
 }
 
 const MAX_LOGS = 400;
@@ -172,19 +182,37 @@ export class WorkflowRun {
 	warnings: string[] = [];
 	foreground: boolean;
 	delivered = false;
+	/** Hard token limit; the human can raise it when the run reaches it. */
+	tokenLimit?: number;
 	/** Arbitrary data the extension keeps per run (for example a parent tool context). */
 	attachments = new Map<string, unknown>();
 
 	private readonly executor: AgentExecutor;
 	private readonly hooks = new Set<RunHooks>();
 	private readonly replay?: ReplayData;
+	/** Saved agent results by input key, in call order. Replay matches calls by their inputs. */
+	private readonly replayByKey = new Map<string, AgentEntry[]>();
+	/** Saved entries that a call of this run took (to reuse, or to run again). */
+	private readonly replayClaimed = new Set<number>();
+	/** Saved entries whose result this run reused. */
+	private readonly replayReused = new Set<number>();
+	/** A journal without dependency data (older runs): match by position with the prefix rule. */
+	private readonly replayLegacy: boolean;
 	/** Fallback for journals without dependency data: the prefix rule. */
 	private diverged = false;
 	private questionsDiverged = false;
+	/** Number of ask() calls of the script (budget questions do not count). */
+	private scriptQuestions = 0;
+	/** Default model per phase, from meta.phases objects. */
+	private readonly phaseModels = new Map<string, string>();
+	private pausedBy?: "user" | "budget";
+	/** The open budget question, if any. */
+	private budgetQid?: number;
+	private readonly stallMs: number;
+	private watchdog?: ReturnType<typeof setInterval>;
+	private watchdogMs = 0;
 	/** Number of agent results delivered to the script so far. */
 	private settledSeq = 0;
-	/** Replay decision per agent id: reused its saved result, or ran live. */
-	private readonly replayDecision = new Map<number, "reused" | "live">();
 	private replayNotes = 0;
 	private host?: ScriptHost;
 	private readonly queue: number[] = [];
@@ -225,7 +253,21 @@ export class WorkflowRun {
 		this.largeWorkflowAgents = init.largeWorkflowAgents;
 		this.largeWorkflowTokens = init.largeWorkflowTokens;
 		this.targetAgents = init.targetAgents;
+		this.tokenLimit = init.tokenBudget && init.tokenBudget > 0 ? Math.round(init.tokenBudget) : undefined;
+		this.stallMs = init.stallMs && init.stallMs > 0 ? init.stallMs : 0;
 		for (const title of init.prepared.meta.phases ?? []) this.phases.push({ title, planned: true });
+		for (const p of init.prepared.meta.phaseInfo ?? []) if (p.model) this.phaseModels.set(p.title, p.model);
+		let legacy = false;
+		if (this.replay) {
+			const entries = [...this.replay.agents.values()].sort((a, b) => a.id - b.id);
+			legacy = entries.some((e) => e.callAfter === undefined);
+			for (const e of entries) {
+				const list = this.replayByKey.get(e.key);
+				if (list) list.push(e);
+				else this.replayByKey.set(e.key, [e]);
+			}
+		}
+		this.replayLegacy = legacy;
 		this.endPromise = new Promise((resolve) => {
 			this.resolveEnd = resolve;
 		});
@@ -300,18 +342,24 @@ export class WorkflowRun {
 		this.emitChange();
 	}
 
-	pause(): void {
+	pause(by: "user" | "budget" = "user"): void {
 		if (this.status !== "running") return;
 		this.status = "paused";
 		this.pausedAt = Date.now();
-		this.log("info", "Paused: running agents finish; no new agents start.");
+		this.pausedBy = by;
+		if (by === "user") this.log("info", "Paused: running agents finish; no new agents start.");
 		this.emitChange();
 	}
 
 	resume(): void {
 		if (this.status !== "paused") return;
+		if (this.budgetQid !== undefined) {
+			this.log("warn", "The run waits for a decision about its token budget. Answer that question to go on.");
+			return;
+		}
 		this.pausedMs += Date.now() - (this.pausedAt ?? Date.now());
 		this.pausedAt = undefined;
+		this.pausedBy = undefined;
 		this.status = "running";
 		this.log("info", "Resumed.");
 		this.pump();
@@ -390,13 +438,21 @@ export class WorkflowRun {
 		const q = this.questions[qid];
 		const pending = this.pendingQuestions.get(qid);
 		if (!q || q.status !== "pending" || !pending) return false;
+		// The token budget protects the human's money: only the human raises it.
+		if (q.kind === "budget" && by === "agent") return false;
 		if (pending.timer) clearTimeout(pending.timer);
 		this.pendingQuestions.delete(qid);
 		q.status = by === "default" ? "defaulted" : "answered";
 		q.answer = answer;
 		q.answeredBy = by;
 		q.answeredAt = Date.now();
-		this.journal({ type: "question", id: q.id, question: q.question, answer });
+		if (q.kind === "budget") {
+			this.onBudgetAnswer(q, answer, by);
+			for (const h of this.hooks) h.onQuestionClosed?.(this, q);
+			this.emitChange();
+			return true;
+		}
+		this.journal({ type: "question", id: q.seq ?? q.id, question: q.question, answer });
 		this.host?.resolve(pending.callId, answer);
 		for (const h of this.hooks) h.onQuestionClosed?.(this, q);
 		this.emitChange();
@@ -431,7 +487,7 @@ export class WorkflowRun {
 	}
 
 	private onAgentCall(callId: number, payload: { prompt: string; opts: AgentCallOptions }, scope: CallScope): void {
-		const opts = payload.opts ?? {};
+		let opts = payload.opts ?? {};
 		if (this.agents.length >= this.limits.maxAgents) {
 			this.host?.reject(callId, {
 				name: "RangeError",
@@ -440,6 +496,9 @@ export class WorkflowRun {
 			return;
 		}
 		const phase = opts.phase?.trim() || scope.phase || DEFAULT_PHASE;
+		// meta.phases can give a phase a default model.
+		const phaseModel = this.phaseModels.get(phase);
+		if (opts.model === undefined && phaseModel) opts = { ...opts, model: phaseModel };
 		const rec: AgentRecord = {
 			callAfter: this.settledSeq,
 			id: this.agents.length,
@@ -509,14 +568,12 @@ export class WorkflowRun {
 				rec.worktree = prev.worktree;
 				rec.startedAt = rec.queuedAt;
 				rec.endedAt = rec.queuedAt;
-				this.replayDecision.set(rec.id, "reused");
 				this.respondValue(rec, prev.result);
 				this.journalAgent(rec);
 				this.pushBudget();
 				this.emitChange();
 				return;
 			}
-			this.replayDecision.set(rec.id, "live");
 			if (decision.why && this.replayNotes < 12) {
 				this.replayNotes++;
 				this.log("info", `Replay: agent #${rec.id} (${rec.label}) runs again: ${decision.why}.`);
@@ -529,10 +586,39 @@ export class WorkflowRun {
 		this.emitChange();
 	}
 
-	private replayCheck(
-		rec: AgentRecord,
-		opts: AgentCallOptions,
-	): { reuse: boolean; prev?: Extract<JournalEntry, { type: "agent" }>; why?: string } {
+	/**
+	 * Replay decision for one call. A call takes the first saved entry with the same
+	 * inputs (prompt and options) that no earlier call took, so a changed call order
+	 * (pipeline stages, for example) still finds its results. The saved result is
+	 * reused only when every agent whose result had reached the script before this
+	 * call (in the earlier run) was reused too: the agent could depend on what they did.
+	 */
+	private replayCheck(rec: AgentRecord, opts: AgentCallOptions): { reuse: boolean; prev?: AgentEntry; why?: string } {
+		const replay = this.replay;
+		if (!replay) return { reuse: false };
+		if (this.replayLegacy) return this.replayCheckByPosition(rec, opts);
+		const candidates = this.replayByKey.get(rec.key) ?? [];
+		const open = candidates.filter((e) => !this.replayClaimed.has(e.id));
+		const prev = open.find((e) => e.status === "done" || e.status === "cached") ?? open[0];
+		if (!prev) return { reuse: false, why: candidates.length ? "an identical call already took its saved result" : "no saved result has the same inputs" };
+		this.replayClaimed.add(prev.id);
+		if (opts.cache === false) return { reuse: false, why: "cache: false" };
+		if (prev.status !== "done" && prev.status !== "cached") return { reuse: false, why: `it was ${prev.status} before` };
+		for (const pj of replay.agents.values()) {
+			if (pj.id === prev.id || pj.endSeq === undefined || prev.callAfter === undefined || pj.endSeq > prev.callAfter) continue;
+			if (!this.replayReused.has(pj.id)) {
+				return {
+					reuse: false,
+					why: `before, it started after the result of agent #${pj.id} (${pj.label}), which ${this.replayClaimed.has(pj.id) ? "runs again" : "this run did not call again"}`,
+				};
+			}
+		}
+		this.replayReused.add(prev.id);
+		return { reuse: true, prev };
+	}
+
+	/** Journals without dependency data: match by position; the first change or failure invalidates the rest. */
+	private replayCheckByPosition(rec: AgentRecord, opts: AgentCallOptions): { reuse: boolean; prev?: AgentEntry; why?: string } {
 		const replay = this.replay;
 		if (!replay) return { reuse: false };
 		const prev = replay.agents.get(rec.id);
@@ -546,26 +632,14 @@ export class WorkflowRun {
 			this.diverged = true;
 			return { reuse: false, why: `it was ${prev.status} before` };
 		}
-		if (prev.callAfter === undefined) {
-			// Old journal: fall back to the prefix rule.
-			return this.diverged ? { reuse: false, why: "an earlier agent ran again" } : { reuse: true, prev };
-		}
-		for (const [j, pj] of replay.agents) {
-			if (j === rec.id || pj.endSeq === undefined || pj.endSeq > prev.callAfter) continue;
-			const d = this.replayDecision.get(j);
-			if (d !== "reused") {
-				return {
-					reuse: false,
-					why: `its call came after the result of agent #${j}, which ${d === "live" ? "runs again" : "was not called again"}`,
-				};
-			}
-		}
-		return { reuse: true, prev };
+		return this.diverged ? { reuse: false, why: "an earlier agent ran again" } : { reuse: true, prev };
 	}
 
 	private onAsk(callId: number, p: { question: string; options?: string[]; default: string | null; timeout?: number }, scope: CallScope): void {
 		const q: QuestionRecord = {
 			id: this.questions.length,
+			seq: this.scriptQuestions++,
+			kind: "script",
 			question: p.question,
 			options: p.options,
 			default: p.default,
@@ -576,7 +650,7 @@ export class WorkflowRun {
 		this.questions.push(q);
 		this.pendingQuestions.set(q.id, { callId });
 		if (this.replay && !this.questionsDiverged) {
-			const prev = this.replay.questions.get(q.id);
+			const prev = this.replay.questions.get(q.seq ?? q.id);
 			if (prev && prev.question === q.question) {
 				this.answerQuestion(q.id, prev.answer, "replay");
 				return;
@@ -653,6 +727,9 @@ export class WorkflowRun {
 			}
 		}
 		this.pendingQuestions.clear();
+		this.budgetQid = undefined;
+		if (this.watchdog) clearInterval(this.watchdog);
+		this.watchdog = undefined;
 		for (const w of this.warming.values()) w.release();
 		this.warming.clear();
 		this.writeResult();
@@ -668,6 +745,12 @@ export class WorkflowRun {
 
 	private pump(): void {
 		while (this.status === "running" && this.running.size < this.limits.maxConcurrency && this.queue.length > 0) {
+			// The budget decides only when a new agent would start: a script that ends
+			// without another agent never sees a budget question.
+			if (this.tokenLimit && this.usage.totalTokens >= this.tokenLimit) {
+				this.onBudgetReached();
+				return;
+			}
 			const id = this.queue.shift() as number;
 			const rec = this.agents[id];
 			if (!rec || rec.status !== "queued") continue;
@@ -734,14 +817,26 @@ export class WorkflowRun {
 		rec.status = "running";
 		rec.activity = rec.attempts > 1 ? `attempt ${rec.attempts}` : "thinking";
 		rec.error = undefined;
+		let live: LiveAttempt | undefined;
+		const alive = () => {
+			if (live) live.lastActivity = Date.now();
+		};
 		const hooks: AttemptHooks = {
-			onChange: () => this.emitChange(),
+			onChange: () => {
+				alive();
+				this.emitChange();
+			},
 			onUsage: (u) => {
+				alive();
 				addUsage(rec.usage, u);
 				addUsage(this.usage, u);
 				this.checkLarge();
 			},
-			onFirstToken: () => this.releaseWarm(plan.prefixKey),
+			onFirstToken: () => {
+				alive();
+				this.releaseWarm(plan.prefixKey);
+			},
+			onActivity: alive,
 		};
 		let handle: AttemptHandle;
 		try {
@@ -750,14 +845,46 @@ export class WorkflowRun {
 			this.settleAttempt(rec, plan, { ok: false, reason: "error", message: (err as Error).message, retryable: false });
 			return;
 		}
-		const live: LiveAttempt = { handle };
-		this.attempts.set(rec.id, live);
+		live = { handle, lastActivity: Date.now() };
+		this.ensureWatchdog(rec.opts.stallMs ?? this.stallMs);
+		const current = live;
+		this.attempts.set(rec.id, current);
 		this.emitChange();
 		handle.promise.then(
-			(outcome) => this.settleAttempt(rec, plan, outcome, live.reason),
+			(outcome) => this.settleAttempt(rec, plan, outcome, current.reason),
 			(err) =>
-				this.settleAttempt(rec, plan, { ok: false, reason: "error", message: (err as Error)?.message ?? String(err), retryable: false }, live.reason),
+				this.settleAttempt(rec, plan, { ok: false, reason: "error", message: (err as Error)?.message ?? String(err), retryable: false }, current.reason),
 		);
+	}
+
+	/** Check live attempts for stalls at a rate that fits the smallest stall limit. */
+	private ensureWatchdog(limit: number): void {
+		if (!(limit > 0)) return;
+		const every = Math.max(50, Math.min(15_000, Math.floor(limit / 4)));
+		if (this.watchdog && this.watchdogMs <= every) return;
+		if (this.watchdog) clearInterval(this.watchdog);
+		this.watchdogMs = every;
+		this.watchdog = setInterval(() => this.checkStalls(), every);
+		this.watchdog.unref?.();
+	}
+
+	private checkStalls(): void {
+		const now = Date.now();
+		for (const [id, live] of this.attempts) {
+			const rec = this.agents[id];
+			if (!rec || live.reason) continue;
+			const limit = rec.opts.stallMs ?? this.stallMs;
+			if (!(limit > 0)) continue;
+			// Time spent waiting for the human is not a stall.
+			if (rec.status === "waiting") {
+				live.lastActivity = now;
+				continue;
+			}
+			if (now - live.lastActivity > limit) {
+				live.reason = "stalled";
+				live.handle.abort("stalled");
+			}
+		}
 	}
 
 	private settleAttempt(rec: AgentRecord, plan: AgentPlan, outcome: AttemptOutcome, reason?: AbortReason): void {
@@ -792,15 +919,26 @@ export class WorkflowRun {
 			this.respondFailure(rec, rec.status);
 			this.journalAgent(rec);
 		} else {
-			const retriesLeft = plan.retries - (rec.attempts - 1);
-			if (outcome.retryable && retriesLeft > 0 && !this.isFinal) {
-				this.log("warn", `Agent #${rec.id} (${rec.label}) failed: ${outcome.message}. Retrying (${retriesLeft} left).`);
+			const stalled = reason === "stalled";
+			const limit = rec.opts.stallMs ?? this.stallMs;
+			const message = stalled
+				? `no activity for ${formatDuration(limit)} (stalled). An agent that runs long silent commands needs a larger stallMs.`
+				: outcome.message;
+			if (stalled) rec.stalls = (rec.stalls ?? 0) + 1;
+			// The first stall gets one extra attempt that does not count against retries.
+			const freeRetry = stalled && rec.stalls === 1;
+			const retriesLeft = plan.retries - (rec.attempts - 1 - Math.min(1, rec.stalls ?? 0));
+			if ((freeRetry || ((outcome.retryable || stalled) && retriesLeft > 0)) && !this.isFinal) {
+				this.log(
+					"warn",
+					`Agent #${rec.id} (${rec.label}) ${stalled ? "showed no activity" : "failed"}: ${message} ${freeRetry ? "It starts again once." : `Retrying (${retriesLeft} left).`}`,
+				);
 				this.running.add(rec.id);
 				this.launchAttempt(rec, plan);
 				return;
 			}
 			rec.status = "failed";
-			rec.error = outcome.message;
+			rec.error = message;
 			rec.activity = undefined;
 			this.respondFailure(rec, "failed");
 			this.journalAgent(rec);
@@ -816,6 +954,8 @@ export class WorkflowRun {
 		rec.endSeq = ++this.settledSeq;
 		this.pendingCalls.delete(rec.id);
 		const out = pending.isolation ? { output: value, worktree: rec.worktree ?? null } : value;
+		// Counts first: the script may read budget right after the result arrives.
+		this.pushBudget();
 		this.host?.resolve(pending.callId, out === undefined ? null : out);
 	}
 
@@ -824,6 +964,7 @@ export class WorkflowRun {
 		if (!pending) return;
 		rec.endSeq = ++this.settledSeq;
 		this.pendingCalls.delete(rec.id);
+		this.pushBudget();
 		if (pending.onError === "throw") {
 			this.host?.reject(pending.callId, {
 				name: "AgentError",
@@ -918,10 +1059,63 @@ export class WorkflowRun {
 			agentsDone: c.done + c.cached,
 			agentsFailed: c.failed,
 			tokens: this.usage.totalTokens,
+			tokenLimit: this.tokenLimit ?? null,
+			tokensRemaining: this.tokenLimit ? Math.max(0, this.tokenLimit - this.usage.totalTokens) : null,
 			cost: Math.round(this.usage.cost * 10000) / 10000,
 			maxConcurrency: this.limits.maxConcurrency,
 			targetAgents: this.targetAgents ?? null,
 		};
+	}
+
+	/** A new agent would start at the token limit: the human decides (or the run stops without one). */
+	private onBudgetReached(): void {
+		const limit = this.tokenLimit;
+		if (!limit || this.isFinal || this.budgetQid !== undefined || this.usage.totalTokens < limit) return;
+		const used = this.usage.totalTokens;
+		this.log("warn", `Token budget reached: ${formatTokens(used)} of ${formatTokens(limit)} tokens. No new agents start.`);
+		const canAsk = [...this.hooks].some((h) => h.canAsk?.());
+		if (!canAsk) {
+			this.stop(`Stopped: the run used its token budget of ${formatTokens(limit)} tokens. Completed agents keep their results; relaunch with a larger budget to go on.`);
+			return;
+		}
+		if (this.status === "running") this.pause("budget");
+		const more = Math.max(1000, Math.round(limit / 2));
+		const q: QuestionRecord = {
+			id: this.questions.length,
+			kind: "budget",
+			question: `${this.name} used its token budget: ${formatTokens(used)} of ${formatTokens(limit)} tokens. No new agents start until you decide. Raise the budget, or stop the run?`,
+			options: [`Add ${formatTokens(more)} (budget ${formatTokens(limit + more)})`, `Double it (budget ${formatTokens(limit * 2)})`, "Stop the run"],
+			default: null,
+			status: "pending",
+			askedAt: Date.now(),
+			phase: "Budget",
+		};
+		this.questions.push(q);
+		this.budgetQid = q.id;
+		this.pendingQuestions.set(q.id, { callId: -1 });
+		for (const h of this.hooks) h.onQuestion?.(this, q);
+		this.emitChange();
+	}
+
+	private onBudgetAnswer(q: QuestionRecord, answer: string | null, by: QuestionRecord["answeredBy"]): void {
+		this.budgetQid = undefined;
+		const limit = this.tokenLimit ?? 0;
+		const pick = q.options?.indexOf(answer ?? "") ?? -1;
+		// A typed amount ("3M") sets the new budget directly.
+		const typed = pick < 0 && answer ? parseTokens(answer) : undefined;
+		let next: number | undefined;
+		if (pick === 0) next = limit + Math.max(1000, Math.round(limit / 2));
+		else if (pick === 1) next = limit * 2;
+		else if (typed && typed > this.usage.totalTokens) next = typed;
+		if (next === undefined) {
+			this.stop(`Stopped: the run used its token budget of ${formatTokens(limit)} tokens.`);
+			return;
+		}
+		this.tokenLimit = next;
+		this.log("info", `Token budget raised to ${formatTokens(next)} tokens by the ${by === "human" ? "user" : by}.`);
+		this.pushBudget();
+		// resume() starts queued agents; at the limit still, pump() asks again.
+		if (this.pausedBy === "budget") this.resume();
 	}
 
 	private pushBudget(): void {
@@ -966,6 +1160,7 @@ export class WorkflowRun {
 			delivered: this.delivered,
 			limits: this.limits,
 			targetAgents: this.targetAgents,
+			tokenLimit: this.tokenLimit,
 		};
 	}
 

@@ -54,11 +54,16 @@ export const PRELUDE_SOURCE = String.raw`(function (bridge, init) {
   }
 
   var OPTION_TYPES = {
-    label: "string", phase: "string", schema: "object", model: "string", thinking: "string",
-    tools: "array", readOnly: "boolean", cwd: "string", isolation: "string", instructions: "string",
-    context: "any", timeout: "number", maxTurns: "number", retries: "number", onError: "string", cache: "boolean"
+    label: "string", phase: "string", schema: "object", model: "string", thinking: "string", effort: "string",
+    tools: "array", readOnly: "boolean", disallowedTools: "array", cwd: "string", isolation: "string", instructions: "string",
+    context: "any", timeout: "number", maxTurns: "number", retries: "number", stallMs: "number", onError: "string", cache: "boolean"
   };
   var THINKING = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+  /** Options of other workflow runtimes, with what to use in pi instead. */
+  var FOREIGN = {
+    agentType: "pi has no agent types. Describe the role with instructions, and choose model and tools.",
+    bashCommandClamp: "pi has no permission rules for agents. Limit an agent with tools (for example readOnly: true) or disallowedTools."
+  };
 
   function typeName(v) { return v === null ? "null" : Array.isArray(v) ? "array" : typeof v; }
 
@@ -69,6 +74,7 @@ export const PRELUDE_SOURCE = String.raw`(function (bridge, init) {
     for (var i = 0; i < keys.length; i++) {
       var k = keys[i];
       var want = OPTION_TYPES[k];
+      if (!want && FOREIGN[k]) throw new TypeError("agent(): option \"" + k + "\" does not exist here: " + FOREIGN[k]);
       if (!want) throw new TypeError("agent(): unknown option \"" + k + "\". Known options: " + Object.keys(OPTION_TYPES).join(", "));
       var v = opts[k];
       if (v === undefined || want === "any") continue;
@@ -76,13 +82,23 @@ export const PRELUDE_SOURCE = String.raw`(function (bridge, init) {
       if (got !== want) throw new TypeError("agent(): option " + k + " must be " + want + ", not " + got);
     }
     if (opts.tools && opts.tools.some(function (t) { return typeof t !== "string"; })) throw new TypeError("agent(): tools must be an array of tool names");
+    if (opts.disallowedTools && opts.disallowedTools.some(function (t) { return typeof t !== "string"; })) throw new TypeError("agent(): disallowedTools must be an array of tool names");
     if (opts.thinking && THINKING.indexOf(opts.thinking) < 0) throw new TypeError("agent(): thinking must be one of " + THINKING.join(", "));
+    if (opts.effort && THINKING.indexOf(opts.effort) < 0) throw new TypeError("agent(): effort (another name of thinking) must be one of " + THINKING.join(", "));
+    if (opts.stallMs !== undefined && !(opts.stallMs >= 0)) throw new TypeError("agent(): stallMs is in milliseconds and must be 0 (off) or more");
     if (opts.isolation && opts.isolation !== "worktree") throw new TypeError("agent(): isolation must be \"worktree\"");
     if (opts.onError && opts.onError !== "null" && opts.onError !== "throw") throw new TypeError("agent(): onError must be \"null\" or \"throw\"");
     if (opts.timeout !== undefined && !(opts.timeout > 0)) throw new TypeError("agent(): timeout is in seconds and must be greater than 0");
     if (opts.maxTurns !== undefined && !(opts.maxTurns >= 1)) throw new TypeError("agent(): maxTurns must be 1 or more");
     if (opts.retries !== undefined && !(opts.retries >= 0)) throw new TypeError("agent(): retries must be 0 or more");
-    return opts;
+    // A copy: the script's object stays as it is. effort is another name of thinking.
+    var out = {};
+    for (var j = 0; j < keys.length; j++) if (opts[keys[j]] !== undefined) out[keys[j]] = opts[keys[j]];
+    if (out.effort !== undefined) {
+      if (out.thinking === undefined) out.thinking = out.effort;
+      delete out.effort;
+    }
+    return out;
   }
 
   function agent(prompt, opts) {
@@ -99,7 +115,11 @@ export const PRELUDE_SOURCE = String.raw`(function (bridge, init) {
     function lane() {
       if (next >= list.length) return Promise.resolve();
       var i = next++;
-      return Promise.resolve(bridge.runIsolated(function () { return fn(list[i], i); })).then(function (v) {
+      var started;
+      // A task that throws at once rejects the call, like a task that rejects later.
+      try { started = Promise.resolve(bridge.runIsolated(function () { return fn(list[i], i); })); }
+      catch (err) { started = Promise.reject(err); }
+      return started.then(function (v) {
         results[i] = v;
         return lane();
       });
@@ -150,9 +170,9 @@ export const PRELUDE_SOURCE = String.raw`(function (bridge, init) {
         if (s > 0 && (value === null || value === undefined)) return null;
         if (s >= stages.length) return value;
         var stage = stages[s];
-        var first = s === 0;
         s++;
-        return Promise.resolve(first ? stage(item, index) : stage(value, item, index)).then(step);
+        // Every stage gets (previous value, item, index). For stage 1 the previous value is the item.
+        return Promise.resolve(stage(value, item, index)).then(step);
       }
       return step(item);
     });
@@ -248,6 +268,27 @@ export const PRELUDE_SOURCE = String.raw`(function (bridge, init) {
     return new Promise(function (resolve) { bridge.sleep(n, resolve); });
   }
 
+  var timers = {};
+  var nextTimer = 0;
+  function setTimeoutFn(fn, ms) {
+    if (typeof fn !== "function") throw new TypeError("setTimeout(fn, ms): fn must be a function");
+    var extra = Array.prototype.slice.call(arguments, 2);
+    var id = ++nextTimer;
+    timers[id] = bridge.timer(Math.max(0, Number(ms) || 0), function () {
+      delete timers[id];
+      try { fn.apply(undefined, extra); } catch (err) {
+        logAt("error", ["setTimeout callback threw: " + ((err && err.message) || String(err))]);
+      }
+    });
+    return id;
+  }
+  function clearTimeoutFn(id) {
+    var handle = timers[id];
+    if (handle === undefined) return;
+    delete timers[id];
+    bridge.clearTimer(handle);
+  }
+
   var state = init.seed >>> 0;
   function random() {
     state = (state + 0x6d2b79f5) >>> 0;
@@ -278,14 +319,22 @@ export const PRELUDE_SOURCE = String.raw`(function (bridge, init) {
   Object.setPrototypeOf(SafeDate, RealDate);
   SafeDate.prototype = RealDate.prototype;
   Object.defineProperty(SafeDate, "now", { value: function () { throw clockError("Date.now()"); } });
-  G.Date = SafeDate;
-  Math.random = function () {
-    throw new Error("Math.random() is disabled in workflow scripts. Use random(), which a relaunched run repeats exactly.");
-  };
 
   function define(name, value) {
     Object.defineProperty(G, name, { value: value, writable: false, enumerable: false, configurable: false });
   }
+
+  // Determinism and hardening. The guards are not writable, so a script cannot switch
+  // them off by accident. Code from strings is off (the context has no eval), stack
+  // trace hooks are locked, and shared memory and GC-observable objects are gone.
+  define("Date", SafeDate);
+  Object.defineProperty(Math, "random", {
+    value: function () { throw new Error("Math.random() is disabled in workflow scripts. Use random(), which a relaunched run repeats exactly."); },
+    writable: false, enumerable: false, configurable: false
+  });
+  Object.defineProperty(G.Error, "prepareStackTrace", { value: undefined, writable: false, enumerable: false, configurable: false });
+  Object.defineProperty(G.Error, "captureStackTrace", { value: G.Error.captureStackTrace, writable: false, enumerable: false, configurable: false });
+  ["WebAssembly", "SharedArrayBuffer", "Atomics", "WeakRef", "FinalizationRegistry"].forEach(function (n) { delete G[n]; });
   define("agent", agent);
   define("parallel", parallel);
   define("pipeline", pipeline);
@@ -295,12 +344,24 @@ export const PRELUDE_SOURCE = String.raw`(function (bridge, init) {
   define("console", consoleObj);
   define("ask", ask);
   define("sleep", sleep);
+  define("setTimeout", setTimeoutFn);
+  define("clearTimeout", clearTimeoutFn);
   define("random", random);
   define("shuffle", shuffle);
   define("args", init.argsJson === undefined ? undefined : deepFreeze(parse(init.argsJson)));
   define("env", deepFreeze(parse(init.envJson)));
+  // budget: live counts, plus total / spent() / remaining() for the token limit.
   Object.defineProperty(G, "budget", {
-    get: function () { return deepFreeze(parse(bridge.budget())); },
+    get: function () {
+      var b = parse(bridge.budget());
+      b.total = b.tokenLimit;
+      b.spent = function () { return parse(bridge.budget()).tokens; };
+      b.remaining = function () {
+        var now = parse(bridge.budget());
+        return now.tokenLimit === null ? Infinity : Math.max(0, now.tokenLimit - now.tokens);
+      };
+      return deepFreeze(b);
+    },
     enumerable: false,
     configurable: false
   });
@@ -320,6 +381,8 @@ let budgetJson = workerData.budgetJson;
 let finished = false;
 let sleeps = 0;
 let idleTicks = 0;
+let nextTimer = 0;
+const timerMap = new Map();
 
 function scope() {
   return als.getStore() || { phase: null, groups: [] };
@@ -404,6 +467,24 @@ const bridge = Object.freeze({
   sleep(ms, done) {
     sleeps++;
     setTimeout(() => { sleeps--; done(); }, Math.min(ms, 2147483647));
+  },
+  timer(ms, fn) {
+    const handle = ++nextTimer;
+    sleeps++;
+    const t = setTimeout(() => {
+      if (!timerMap.delete(handle)) return;
+      sleeps--;
+      fn();
+    }, Math.min(ms, 2147483647));
+    timerMap.set(handle, t);
+    return handle;
+  },
+  clearTimer(handle) {
+    const t = timerMap.get(handle);
+    if (t === undefined) return;
+    timerMap.delete(handle);
+    clearTimeout(t);
+    sleeps--;
   }
 });
 
@@ -417,7 +498,8 @@ process.on("unhandledRejection", (reason) => {
   });
 });
 
-const context = vm.createContext({}, { name: "workflow", codeGeneration: { strings: true, wasm: false } });
+// No code from strings in the script context: eval and new Function throw.
+const context = vm.createContext({}, { name: "workflow", codeGeneration: { strings: false, wasm: false } });
 try {
   const install = new vm.Script(workerData.prelude, { filename: "workflow-prelude.js" }).runInContext(context);
   install(bridge, {
@@ -474,7 +556,7 @@ setInterval(() => {
         type: "error",
         error: {
           name: "Error",
-          message: "The script waits on a promise that can never settle: no agent(), ask(), or sleep() call is pending. Check that every promise you await is resolved."
+          message: "The script waits on a promise that can never settle: no agent(), ask(), sleep(), or setTimeout() call is pending. Check that every promise you await is resolved."
         }
       });
     }

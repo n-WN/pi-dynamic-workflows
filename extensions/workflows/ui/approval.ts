@@ -9,9 +9,10 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { highlightCode } from "@earendil-works/pi-coding-agent";
 import { type Component, Input, matchesKey, type TUI, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { oneLine, plural, previewJson } from "../format.ts";
+import { formatTokens, oneLine, parseTokens, plural, previewJson } from "../format.ts";
 import type { ScriptPlan } from "../script.ts";
-import { box, hints, section } from "./draw.ts";
+import type { PhaseInfo } from "../types.ts";
+import { box, hints, hintsFit, section } from "./draw.ts";
 
 export type ApprovalChoice =
 	| { action: "run" }
@@ -35,6 +36,12 @@ export interface ApprovalInfo {
 	plan?: ScriptPlan;
 	/** Tools an agent gets when the script does not choose. */
 	agentTools?: string[];
+	/** meta.phases objects: detail and default model per phase. */
+	phaseInfo?: PhaseInfo[];
+	/** meta.title. */
+	title?: string;
+	/** Hard token limit of the run; 0: none. The human can change it here (b). */
+	budget: number;
 	/** Saved, bundled, or file workflow: offer "don't ask again for <name>". */
 	named: boolean;
 	edited: boolean;
@@ -68,9 +75,11 @@ export class ApprovalDialog implements Component {
 	private readonly done: (c: ApprovalChoice) => void;
 	private readonly options: Option[];
 	private sel = 0;
-	private mode: "menu" | "script" | "feedback" = "menu";
+	private mode: "menu" | "script" | "feedback" | "budget" = "menu";
 	private scroll = 0;
 	private readonly feedback = new Input();
+	private readonly budgetInput = new Input();
+	private budgetError?: string;
 	private codeLines?: string[];
 
 	constructor(tui: TUI, theme: Theme, info: ApprovalInfo, done: (c: ApprovalChoice) => void) {
@@ -93,6 +102,26 @@ export class ApprovalDialog implements Component {
 	}
 
 	handleInput(data: string): void {
+		if (this.mode === "budget") {
+			if (matchesKey(data, "escape")) {
+				this.mode = "menu";
+				this.budgetError = undefined;
+			} else if (matchesKey(data, "enter")) {
+				const text = this.budgetInput.getValue().trim();
+				const tokens = text === "" || text === "0" || /^(none|off|no)$/i.test(text) ? 0 : parseTokens(text);
+				if (tokens === undefined) this.budgetError = "Write a token amount such as 500k or 2M, or leave it empty for no limit.";
+				else {
+					this.info.budget = tokens;
+					this.mode = "menu";
+					this.budgetError = undefined;
+				}
+			} else {
+				this.budgetInput.handleInput(data);
+				this.budgetError = undefined;
+			}
+			this.tui.requestRender();
+			return;
+		}
 		if (this.mode === "feedback") {
 			if (matchesKey(data, "escape")) this.mode = "menu";
 			else if (matchesKey(data, "enter")) {
@@ -131,6 +160,12 @@ export class ApprovalDialog implements Component {
 		}
 		if (data === "v") {
 			this.mode = "script";
+			this.tui.requestRender();
+			return;
+		}
+		if (data === "b") {
+			this.mode = "budget";
+			this.budgetInput.setValue(this.info.budget ? formatTokens(this.info.budget) : "");
 			this.tui.requestRender();
 			return;
 		}
@@ -190,10 +225,16 @@ export class ApprovalDialog implements Component {
 			wrapTextWithAnsi(value, Math.max(10, inner - LABEL)).forEach((l, i) => lines.push(`${i === 0 ? label(k) : " ".repeat(LABEL)}${l}`));
 		};
 		const dot = th.fg("dim", " · ");
-		lines.push(`${th.fg("accent", "◆")} ${th.bold(info.name)}${info.edited ? th.fg("warning", "  (edited)") : ""}`);
+		lines.push(`${th.fg("accent", "◆")} ${th.bold(info.name)}${info.title ? th.fg("muted", ` · ${info.title}`) : ""}${info.edited ? th.fg("warning", "  (edited)") : ""}`);
 		for (const l of wrapTextWithAnsi(info.description, inner - 2).slice(0, 3)) lines.push(`  ${th.fg("text", l)}`);
 		lines.push("");
-		if (info.phases.length) row("Phases", info.phases.map((p, i) => `${th.fg("dim", `${i + 1}`)} ${p}`).join(th.fg("dim", "  →  ")));
+		if (info.phaseInfo?.length) {
+			// Phases with details or models: one phase per row.
+			info.phaseInfo.forEach((p, i) => {
+				const extra = [p.detail ?? "", p.model ? th.fg("muted", `model ${p.model}`) : ""].filter(Boolean).join(dot);
+				row(i === 0 ? "Phases" : "", `${th.fg("dim", `${i + 1}`)} ${th.bold(p.title)}${extra ? ` ${th.fg("dim", "—")} ${extra}` : ""}`);
+			});
+		} else if (info.phases.length) row("Phases", info.phases.map((p, i) => `${th.fg("dim", `${i + 1}`)} ${p}`).join(th.fg("dim", "  →  ")));
 		const plan = info.plan;
 		if (plan) {
 			const calls = plan.agentCalls ? plural(plan.agentCalls, "agent() call") + " in the script" : "no agent() calls found in the script";
@@ -214,6 +255,12 @@ export class ApprovalDialog implements Component {
 		}
 		row("Model", [info.model, plan?.models.length ? `the script also names ${plan.models.join(", ")}` : ""].filter(Boolean).join(dot));
 		if (plan?.asks) row("Questions", `${plural(plan.asks, "ask() call")}: the run can stop and wait for your answer`);
+		row(
+			"Budget",
+			info.budget
+				? `${th.bold(`${formatTokens(info.budget)} tokens`)} for all agents: at the limit no new agent starts, and the run asks you ${th.fg("dim", "· b changes")}`
+				: `${th.fg("muted", "no token limit")} ${th.fg("dim", "· b sets one")}`,
+		);
 		row("Script", `${info.source} · ${info.lineCount} lines`);
 		lines.push(`${" ".repeat(LABEL)}${th.fg("dim", middleCut(shortHome(info.scriptPath), inner - LABEL))}`);
 		if (info.args !== undefined) row("Args", oneLine(previewJson(info.args, 300), 300));
@@ -221,6 +268,20 @@ export class ApprovalDialog implements Component {
 		for (const n of info.notes) lines.push(th.fg("warning", `⚠ ${n}`));
 		lines.push("");
 
+		if (this.mode === "budget") {
+			this.budgetInput.focused = this.focused;
+			lines.push(section(th, "Token budget for this run"));
+			lines.push(this.budgetInput.render(inner)[0] ?? "");
+			lines.push(th.fg("dim", "All agents together. Examples: 500k, 2M. Empty: no limit. At the limit no new agent starts, and the run asks you."));
+			if (this.budgetError) lines.push(th.fg("error", this.budgetError));
+			return box(th, lines, width, {
+				title: "Run workflow?",
+				footer: hints(th, [
+					["enter", "set"],
+					["esc", "back"],
+				]),
+			});
+		}
 		if (this.mode === "feedback") {
 			this.feedback.focused = this.focused;
 			lines.push(section(th, "Tell the agent what to change"));
@@ -243,14 +304,20 @@ export class ApprovalDialog implements Component {
 		return box(th, lines.slice(0, maxBody), width, {
 			title: "Run workflow?",
 			right: th.fg("warning", "uses many tokens"),
-			footer: hints(th, [
-				["↑↓", "select"],
-				["enter", "confirm"],
-				["v", "script"],
-				["ctrl+g", "edit"],
-				["tab", "feedback"],
-				["esc", "no"],
-			]),
+			footer: hintsFit(
+				th,
+				[
+					["↑↓", "select"],
+					["enter", "confirm"],
+					["b", "budget"],
+					["v", "script"],
+					["ctrl+g", "edit"],
+					["tab", "feedback"],
+					["esc", "no"],
+				],
+				inner - 2,
+				false,
+			),
 		});
 	}
 }

@@ -136,7 +136,8 @@ function agentLine(run: WorkflowRun): string {
 	if (c.skipped) parts.push(`${c.skipped} skipped`);
 	if (c.active) parts.push(`${c.active} running`);
 	const cost = formatCost(run.usage.cost);
-	return `Duration ${formatDuration(run.elapsedMs())} · agents ${c.total} (${parts.join(", ")}) · tokens ${formatTokens(run.usage.totalTokens)}${cost ? ` · cost ${cost}` : ""}`;
+	const budget = run.tokenLimit ? ` of a ${formatTokens(run.tokenLimit)} budget` : "";
+	return `Duration ${formatDuration(run.elapsedMs())} · agents ${c.total} (${parts.join(", ")}) · tokens ${formatTokens(run.usage.totalTokens)}${budget}${cost ? ` · cost ${cost}` : ""}`;
 }
 
 /** The <workflow-result> message the main agent receives when a run ends. */

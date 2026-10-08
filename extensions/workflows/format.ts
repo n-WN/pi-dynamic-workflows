@@ -42,6 +42,18 @@ export function formatTokens(n: number): string {
 	return `${(n / 1_000_000).toFixed(2).replace(/0$/, "").replace(/\.0$/, "")}M`;
 }
 
+/** "500k", "2M", "1.5m", "750000", 750000 -> tokens. Undefined when it is not an amount. */
+export function parseTokens(value: unknown): number | undefined {
+	if (typeof value === "number") return Number.isFinite(value) && value > 0 ? Math.round(value) : undefined;
+	if (typeof value !== "string") return undefined;
+	const m = /^\s*([0-9]+(?:[.,][0-9]+)?)\s*([kKmM])?\s*(?:tokens?|tok)?\s*$/.exec(value.replace(/_/g, ""));
+	if (!m) return undefined;
+	const n = Number(m[1].replace(",", "."));
+	const unit = m[2]?.toLowerCase() === "m" ? 1_000_000 : m[2]?.toLowerCase() === "k" ? 1000 : 1;
+	const tokens = Math.round(n * unit);
+	return tokens > 0 ? tokens : undefined;
+}
+
 export function formatCost(cost: number): string {
 	if (!cost || cost <= 0) return "";
 	if (cost < 0.01) return "<$0.01";

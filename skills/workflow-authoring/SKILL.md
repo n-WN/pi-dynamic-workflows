@@ -159,6 +159,21 @@ Concurrent agents per run (default 16), 1000 agents per run, 4096 items per
 `parallel`/`pipeline`/`race` call. A size guideline (default: fewer than 10 agents) is
 advice: follow it unless the user asks for a bigger or smaller run.
 
+## Scout first, then orchestrate
+
+When you can list the work yourself with one quick command (`ls`, `rg -l`, a package
+list), do it in the conversation and pass the list in `args`. The script then spends
+agents on the real work only:
+
+```js
+// In the conversation: rg -l "router\." src/routes  ->  12 files
+// workflow({ script, args: { files: [...] } })
+const audits = await pipeline(args.files, (file) => agent(`Audit ${file} ...`, { label: file, readOnly: true, schema: FINDINGS }))
+```
+
+Use a discovery agent (as in the script shape above) when finding the work needs
+judgment, or when the list is too large for the conversation.
+
 ## Writing good agent prompts
 
 - Make every prompt self-contained: paths, the goal, the criteria, and what to return.

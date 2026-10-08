@@ -16,7 +16,7 @@ export function sizeAdvice(cfg: WorkflowConfig): string {
 export function workflowToolDescription(cfg: WorkflowConfig): string {
 	return `Run a dynamic workflow: a JavaScript orchestration script that runs many subagents in the background and returns one consolidated result. The script holds the loop, the branching, and the intermediate results, so only the final result reaches this conversation.
 
-Use it only when the user asks for a workflow (in their words, or with the keyword "${cfg.keyword}"), when ${cfg.keyword} mode is on, or when the user runs a saved workflow. It fits tasks with many independent parts: codebase-wide audits, large migrations, research that needs cross-checked sources, plans drafted from several angles. Do not use it for small tasks: a workflow uses many more tokens than normal work.
+Use it only when the user asks for a workflow (in their words, or with the keyword "${cfg.keyword}"), when ${cfg.keyword} mode is on, or when the user runs a saved workflow. If none of these is true but a workflow would clearly help, say what it would do and what it costs, and ask first. It fits tasks with many independent parts: codebase-wide audits, large migrations, research that needs cross-checked sources, plans drafted from several angles. Do not use it for small tasks: a workflow uses many more tokens than normal work.
 
 The call returns at once with a run ID (unless wait is true). The final result arrives later as a <workflow-result> message. Do not poll. Continue other work or end your turn.
 
@@ -37,6 +37,7 @@ GLOBALS
 - args (the input value), env ({ cwd, runId, model, tools, defaultTools, gitRepo }), budget (live: agentsStarted, agentsRemaining, agentsRunning, tokens, tokenLimit, maxConcurrency, targetAgents; total, spent(), remaining() for the token limit), sleep(ms), setTimeout/clearTimeout, random() (seeded), shuffle(list).
 
 RULES
+- Scout first: when one quick command of yours can list the work (files, packages, URLs), do it in this conversation and pass the list in args. Spend agents on the real work, not on listing it.
 - Agents do not see this conversation. Each prompt must be self-contained: give paths, criteria, and the output format.
 - Use schema whenever later code reads fields of a result. Keep results small: return findings, not file contents.
 - The script cannot read files, run commands, or import modules (no import/require). Agents do that work.

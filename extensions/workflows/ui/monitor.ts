@@ -78,7 +78,7 @@ type Mode =
 	| { kind: "answer"; target: Interaction; sel: number; input?: Input; remember?: boolean }
 	| { kind: "confirm-stop"; runId: string }
 	| { kind: "confirm-stop-agent"; runId: string; agentId: number }
-	| { kind: "steer"; runId: string; agentId: number; input: Input };
+	| { kind: "steer"; runId: string; agentId: number; input: Input; interrupt?: boolean };
 
 export interface MonitorActions {
 	sessionId(): string;
@@ -90,6 +90,8 @@ export interface MonitorActions {
 
 /** Smallest body height of the box; it grows with its content and does not shrink while open. */
 const MIN_BODY = 10;
+/** An agent without any activity for this long shows as quiet (it may hang). */
+const QUIET_MS = 60_000;
 
 function isLive(r: RunLike): r is WorkflowRun {
 	return r instanceof WorkflowRun || typeof (r as unknown as WorkflowRun).elapsedMs === "function";
@@ -186,24 +188,27 @@ const HELP: Record<View["kind"], Array<[string, string]>> = {
 		["↑↓ j k", "select an agent"],
 		["enter →", "agent detail"],
 		["o", "order: by start or by duration"],
+		["i r x m", "interrupt, restart, stop, or message the selected agent"],
 		["esc ←", "back"],
 	],
 	phase: [
 		["↑↓ j k", "select an agent"],
 		["enter →", "agent detail"],
 		["f", "filter: all, active, failed, done, queued"],
-		["m", "send a message to the running agent"],
+		["m", "send a message (the agent reads it after its current step)"],
+		["i", "interrupt a hanging step: the agent goes on with its context"],
+		["r", "restart the agent from the beginning"],
 		["x", "stop the agent (the script gets null)"],
-		["r", "restart the running agent"],
 		["esc ←", "back"],
 	],
 	agent: [
 		["↑↓ pgup pgdn", "scroll"],
 		["g G", "top, bottom"],
 		["enter e", "expand the prompt, tool calls, and result"],
-		["m", "send a message to the running agent"],
+		["m", "send a message (the agent reads it after its current step)"],
+		["i", "interrupt a hanging step: the agent goes on with its context"],
+		["r", "restart the agent from the beginning"],
 		["x", "stop the agent (the script gets null)"],
-		["r", "restart the running agent"],
 		["esc ←", "back"],
 	],
 	script: [
@@ -518,6 +523,9 @@ export class WorkflowMonitor implements Component {
 		} else if (data === "m") {
 			if (isLive(run) && AGENT_ACTIVE.has(agent.status)) this.mode = { kind: "steer", runId: run.id, agentId: agent.id, input: new Input() };
 			else this.setFlash("Only a running agent can get a message.");
+		} else if (data === "i") {
+			if (isLive(run) && AGENT_ACTIVE.has(agent.status)) this.mode = { kind: "steer", runId: run.id, agentId: agent.id, input: new Input(), interrupt: true };
+			else this.setFlash("Only a running agent can be interrupted.");
 		} else if (data === "p" || data === "s") {
 			this.runAction(data, run);
 		}
@@ -618,7 +626,17 @@ export class WorkflowMonitor implements Component {
 			const text = mode.input.getValue().trim();
 			const run = this.findRun(mode.runId);
 			this.mode = { kind: "normal" };
-			if (text && run && isLive(run)) {
+			if (mode.interrupt && run && isLive(run)) {
+				void run.interruptAgent(mode.agentId, text, "human").then((ok) => {
+					this.setFlash(
+						ok
+							? `Interrupted the current step of agent #${mode.agentId}; it goes on with its context. If it still hangs, r restarts it.`
+							: `Agent #${mode.agentId} has no step to interrupt now. r restarts it; x stops it.`,
+						ok ? "info" : "warning",
+					);
+					this.tui.requestRender();
+				});
+			} else if (text && run && isLive(run)) {
 				void run.steerAgent(mode.agentId, text, "human").then((ok) => {
 					this.setFlash(ok ? `Sent to agent #${mode.agentId}. It reads the message after its current step.` : `Agent #${mode.agentId} cannot take a message now.`, ok ? "info" : "warning");
 					this.tui.requestRender();
@@ -751,7 +769,7 @@ export class WorkflowMonitor implements Component {
 				]);
 			case "steer":
 				return hints(th, [
-					["enter", "send"],
+					["enter", this.mode.interrupt ? "interrupt" : "send"],
 					["esc", "cancel"],
 				]);
 			default:
@@ -776,9 +794,21 @@ export class WorkflowMonitor implements Component {
 		if (m.kind === "steer") {
 			m.input.focused = this.focused;
 			const agent = this.findRun(m.runId)?.agents[m.agentId];
+			const who = `agent #${m.agentId}${agent ? ` (${agent.label})` : ""}`;
+			if (m.interrupt) {
+				return [
+					"",
+					section(th, `Interrupt ${who}`),
+					m.input.render(inner)[0] ?? "",
+					th.fg(
+						"dim",
+						oneLine(`Stops its current step (${oneLine(agent?.activity ?? "running", 40)}) and lets it go on with its context. Optional: a message, such as "skip the slow test".`, inner),
+					),
+				];
+			}
 			return [
 				"",
-				section(th, `Message to agent #${m.agentId}${agent ? ` (${agent.label})` : ""}`),
+				section(th, `Message to ${who}`),
 				m.input.render(inner)[0] ?? "",
 				th.fg("dim", "The agent reads it after its current step and continues with it. Use it to correct or focus the agent."),
 			];
@@ -874,7 +904,7 @@ export class WorkflowMonitor implements Component {
 					title: `Workflows › ${run.name} › ${v.phase}`,
 					right: th.fg("muted", right),
 					lines: this.phaseLines(run, v, inner, height, now),
-					footer: [...nav, ["↑↓", "select"], ["enter", "detail"], ["f", "filter"], ["m", "message"], ["x", "stop"], ["r", "restart"], ["esc", "back"]],
+					footer: [...nav, ["↑↓", "select"], ["enter", "detail"], ["f", "filter"], ["m", "message"], ["i", "interrupt"], ["r", "restart"], ["x", "stop"], ["esc", "back"]],
 				};
 			}
 			case "agent": {
@@ -886,7 +916,7 @@ export class WorkflowMonitor implements Component {
 					title: `${run.name} › ${agent.phase} › #${agent.id} ${agent.label}`,
 					right: status,
 					lines: this.agentLines(run, agent, v, inner, height, now),
-					footer: [...nav, ["↑↓", "scroll"], ["enter", v.expanded ? "collapse" : "expand"], ["m", "message"], ["x", "stop"], ["r", "restart"], ["esc", "back"]],
+					footer: [...nav, ["↑↓", "scroll"], ["enter", v.expanded ? "collapse" : "expand"], ["m", "message"], ["i", "interrupt"], ["r", "restart"], ["x", "stop"], ["esc", "back"]],
 				};
 			}
 			case "script": {
@@ -1272,7 +1302,7 @@ export class WorkflowMonitor implements Component {
 			cells.push(
 				fitRight(a.usage.totalTokens ? formatTokens(a.usage.totalTokens) : "", 6),
 				fitRight(a.startedAt ? formatSpan(agentDuration(a, now)) : "", 5),
-				fit(this.agentDetailText(a, detailW, now), detailW),
+				fit(this.agentDetailText(run, a, detailW, now), detailW),
 			);
 			lines.push(cells.join(" "));
 		}
@@ -1317,14 +1347,18 @@ export class WorkflowMonitor implements Component {
 		return out.slice(0, room);
 	}
 
-	private agentDetailText(a: AgentRecord, width: number, now: number): string {
+	private agentDetailText(run: RunLike, a: AgentRecord, width: number, now: number): string {
 		const th = this.theme;
 		switch (a.status as AgentStatus) {
 			case "queued":
 				return th.fg("dim", `queued for ${formatDuration(now - a.queuedAt)}, waits for a free slot`);
 			case "starting":
-			case "running":
+			case "running": {
+				// A long quiet time is the sign of a hanging step.
+				const quiet = isLive(run) ? run.quietMs(a.id, now) : 0;
+				if (quiet >= QUIET_MS) return `${th.fg("warning", `quiet ${formatDuration(quiet)}`)} ${th.fg("muted", oneLine(a.activity ?? "running", width))}`;
 				return th.fg("muted", oneLine(a.activity ?? "running", width));
+			}
 			case "waiting":
 				return th.fg("warning", oneLine(`waits for you: ${a.waitingFor ?? ""}`, width));
 			case "done":
@@ -1374,12 +1408,21 @@ export class WorkflowMonitor implements Component {
 			a.status === "cached" ? `reused from ${a.fromRunId ?? "an earlier run"}` : "",
 			wait >= 1000 ? `waited ${formatDuration(wait)} for a free slot` : "",
 			a.startedAt ? `ran ${formatDuration(agentDuration(a, now))}` : "",
+			a.interrupts ? plural(a.interrupts, "interrupted step") : "",
+			a.stalls ? plural(a.stalls, "stall") : "",
 		].filter(Boolean);
 		all.push(th.fg("muted", timing.join(sep)));
 		wrap(`tools ${a.tools.join(", ") || "none"}${a.opts.schema ? " · structured result (schema)" : ""}${a.opts.cwd ? ` · cwd ${a.opts.cwd}` : ""}`, (s) => th.fg("muted", s));
 		if (a.transcriptPath) all.push(th.fg("dim", middleTruncate(`transcript ${shortHome(a.transcriptPath)}`, inner)));
 		if (a.worktree) wrap(`worktree ${a.worktree.path} · branch ${a.worktree.branch}${a.worktree.changed ? ` · ${a.worktree.diffStat ?? "changed"}` : " · no changes"}`, (s) => th.fg("dim", s));
 		if (a.waitingFor) wrap(`waits for you: ${a.waitingFor} (press a)`, (s) => th.fg("warning", s));
+		const quiet = isLive(run) ? run.quietMs(a.id, now) : 0;
+		if (quiet >= QUIET_MS) {
+			wrap(
+				`No activity for ${formatDuration(quiet)} (${a.activity ?? "running"}). If it hangs: i interrupts the step (the agent keeps its context), r restarts it, x stops it.`,
+				(s) => th.fg("warning", s),
+			);
+		}
 		if (a.error && (a.status === "failed" || a.status === "stopped" || a.status === "skipped")) {
 			all.push("");
 			all.push(section(th, a.status === "failed" ? "Error" : a.status === "stopped" ? "Stopped" : "Skipped"));

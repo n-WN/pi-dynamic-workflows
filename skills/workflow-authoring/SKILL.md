@@ -321,7 +321,9 @@ The API is close, and scripts usually run as they are. The differences:
 ## Watching a run
 
 The human watches runs in `/workflows` (also `alt+w`): runs → phases → agents → one
-agent's prompt, tool calls, output, and result. They can pause, stop a run or one agent,
-restart an agent, send a message to a running agent, answer questions, and save the script
-as a `/command`. The main agent can use `workflow_control` (`list`, `status`, `wait`, `stop`,
-`pause`, `resume`, `answer`, `steer`).
+agent's prompt, tool calls, output, and result, plus a timeline. They can pause, stop a run
+or one agent, interrupt an agent's hanging step, restart an agent, send a message to a
+running agent, answer questions, and save the script as a `/command`. The main agent can use
+`workflow_control` (`list`, `status`, `wait`, `stop`, `pause`, `resume`, `answer`, `steer`,
+`interrupt`, `restart`). For a hung agent (`status` says "no activity for ..."), interrupt
+first (it keeps the agent's work), then restart, then stop.

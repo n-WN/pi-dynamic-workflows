@@ -295,14 +295,14 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Inspect, wait for, answer, pause, or stop dynamic workflow runs",
 		parameters: Type.Object({
 			action: Type.Union(
-				["list", "status", "wait", "stop", "pause", "resume", "answer", "steer"].map((a) => Type.Literal(a)),
+				["list", "status", "wait", "stop", "pause", "resume", "answer", "steer", "interrupt", "restart"].map((a) => Type.Literal(a)),
 				{ description: "What to do." },
 			),
 			runId: Type.Optional(Type.String({ description: "Run ID, such as wf-k3x9ab." })),
-			agent: Type.Optional(Type.Number({ description: "Agent number (#n) for stop." })),
+			agent: Type.Optional(Type.Number({ description: "Agent number (#n) for stop, steer, interrupt, and restart." })),
 			question: Type.Optional(Type.Number({ description: "Question number for answer." })),
 			answer: Type.Optional(Type.String({ description: "Answer text for answer." })),
-			message: Type.Optional(Type.String({ description: "For steer: a message to a running agent (correction or extra instruction)." })),
+			message: Type.Optional(Type.String({ description: "For steer and interrupt: a message to a running agent (correction or extra instruction)." })),
 			timeout: Type.Optional(Type.Number({ description: "For wait: give up after this many seconds (default 600)." })),
 		}),
 		renderCall: (args, theme) => {
@@ -379,6 +379,22 @@ export default function workflowsExtension(pi: ExtensionAPI): void {
 					if (r.isFinal) return text(`Run ${r.id} already ended (${r.status}).`);
 					r.stop("Stopped by the agent.");
 					return text(`Stopped run ${r.id}. Completed agent results are saved; relaunch with workflow({ resumeFromRunId: "${r.id}" }).`);
+				}
+				case "interrupt": {
+					const r = pick();
+					if (typeof r === "string") return text(r, true);
+					if (params.agent === undefined) return text("Pass agent (number). message is optional.", true);
+					return (await r.interruptAgent(params.agent, params.message ?? "", "agent"))
+						? text(`Interrupted the current step of agent #${params.agent} of ${r.id}. It goes on with its context${params.message ? " and your message" : ""}. If it still hangs, use restart.`)
+						: text(`Agent #${params.agent} of ${r.id} has no running step to interrupt. Use restart or stop.`, true);
+				}
+				case "restart": {
+					const r = pick();
+					if (typeof r === "string") return text(r, true);
+					if (params.agent === undefined) return text("Pass agent (number).", true);
+					return r.restartAgent(params.agent)
+						? text(`Restarting agent #${params.agent} of ${r.id} from the beginning (a new conversation with the same prompt).`)
+						: text(`Agent #${params.agent} of ${r.id} is not running, so it cannot restart. A finished run relaunches with workflow({ resumeFromRunId: "${r.id}" }).`, true);
 				}
 				case "pause":
 				case "resume": {

@@ -69,7 +69,10 @@ Actions:
 - stop (runId, agent?): stop a whole run, or one agent by its number.
 - pause / resume (runId): hold or release new agent starts.
 - answer (runId, question, answer): answer an ask() question when the user told you the answer.
-- steer (runId, agent, message): send a correction or extra instruction to one running agent.
+- steer (runId, agent, message): send a correction or extra instruction to one running agent (it reads it after its current step).
+- interrupt (runId, agent, message?): stop the agent's current step when it hangs (a command that waits, a tool that does not return); the agent goes on with its context and the message.
+- restart (runId, agent): start a running agent again from the beginning (a new conversation).
+A hung agent: status shows its activity; interrupt first, then restart, then stop (the script gets null). A stopped or failed run relaunches with workflow({ resumeFromRunId }).
 Do not use status in a loop to wait; the result arrives as a <workflow-result> message.`;
 
 export function workflowsSection(cfg: WorkflowConfig, saved: Array<{ name: string; description: string; argsHint?: string; whenToUse?: string }>): string {

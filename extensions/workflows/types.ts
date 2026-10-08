@@ -148,8 +148,12 @@ export interface AgentRecord {
 	fromRunId?: string;
 	/** Messages that the human or the main agent sent to this agent while it ran. */
 	steers?: Array<{ t: number; by: "human" | "agent"; text: string }>;
-	/** Attempts that the run aborted because the agent showed no activity. */
+	/** Times the agent showed no activity for its stall limit. */
 	stalls?: number;
+	/** Free restarts after a stall that were used (at most one). */
+	stallRestarts?: number;
+	/** Times its current step was interrupted while it went on with its context. */
+	interrupts?: number;
 	/** How many agent results the script had received when it made this call (replay dependencies). */
 	callAfter?: number;
 	/** Position of this agent in the order in which results reached the script. */

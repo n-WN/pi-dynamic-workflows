@@ -112,10 +112,22 @@ Each `agent()` attempt is an in-process `AgentSession` (pi SDK):
   answer once for all of them (`tab` in the monitor, or a "for all agents of this
   run" choice in the dialog from the second time on). The key is the run plus the
   exact kind, title, message, and options, so a different command asks again.
-- A stall watchdog per run aborts an attempt without any sign of life (no session
-  event: token, tool start, tool update) for `stallMs` (default 10 minutes) and
-  starts it once more for free. Time spent waiting for the human does not count.
-  A second stall fails the agent (or uses `retries`).
+- Interrupt: `session.abort()` ends the agent's current step (a model response or
+  a tool call; pi's bash tool kills its process), and the attempt goes on in the
+  same conversation with a note (and the human's optional message). This is the
+  workflow version of Esc and a follow-up in pi. It keeps the agent's work, which a
+  restart would lose.
+- A stall watchdog per run watches every attempt for signs of life (any session
+  event: a token, a tool start, a tool update). Time spent waiting for the human
+  does not count. After `stallMs` (default 10 minutes) without one, it escalates:
+  first stall, interrupt the step (the context stays); second stall, restart the
+  agent once for free (a new conversation); third stall, the agent fails (or uses
+  `retries`).
+- A stop, restart, or stall abort must be final even when a step ignores the
+  stop signal (an extension tool that does not watch its `AbortSignal`, for
+  example). The run gives such an attempt 10 seconds; then it gives up on it
+  (stop: the script gets `null`; restart: a new attempt starts) and ignores what
+  the old attempt reports later.
 
 ### 2.2a Token budget
 

@@ -59,6 +59,11 @@ export interface AttemptHandle {
 	abort(reason: AbortReason): void;
 	/** Send a message to the running agent. Resolves false when it cannot take one now. */
 	steer?(text: string, by: "human" | "agent"): Promise<boolean>;
+	/**
+	 * Stop the agent's current step (a model response or a tool call) and let it go on
+	 * in the same conversation with `note`. Resolves false when no step runs now.
+	 */
+	interrupt?(note: string): Promise<boolean>;
 }
 
 /** What one agent call resolves to before it runs. */
@@ -125,6 +130,8 @@ export interface WorkflowRunInit {
 	tokenBudget?: number;
 	/** Abort an attempt that shows no activity for this long, and start it again once. 0: off. */
 	stallMs?: number;
+	/** Time a stopped attempt gets to end before the run gives up on it. Default 10 s. */
+	abandonMs?: number;
 }
 
 interface PendingCall {
@@ -138,6 +145,9 @@ interface LiveAttempt {
 	reason?: AbortReason;
 	/** Last sign of life of the attempt (stall watchdog). */
 	lastActivity: number;
+	/** The attempt did not end after a stop; the run went on without it. */
+	abandoned?: boolean;
+	abandonTimer?: ReturnType<typeof setTimeout>;
 }
 
 const MAX_LOGS = 400;
@@ -209,6 +219,7 @@ export class WorkflowRun {
 	/** The open budget question, if any. */
 	private budgetQid?: number;
 	private readonly stallMs: number;
+	private readonly abandonMs: number;
 	private watchdog?: ReturnType<typeof setInterval>;
 	private watchdogMs = 0;
 	/** Number of agent results delivered to the script so far. */
@@ -255,6 +266,7 @@ export class WorkflowRun {
 		this.targetAgents = init.targetAgents;
 		this.tokenLimit = init.tokenBudget && init.tokenBudget > 0 ? Math.round(init.tokenBudget) : undefined;
 		this.stallMs = init.stallMs && init.stallMs > 0 ? init.stallMs : 0;
+		this.abandonMs = init.abandonMs && init.abandonMs > 0 ? init.abandonMs : 10_000;
 		for (const title of init.prepared.meta.phases ?? []) this.phases.push({ title, planned: true });
 		for (const p of init.prepared.meta.phaseInfo ?? []) if (p.model) this.phaseModels.set(p.title, p.model);
 		let legacy = false;
@@ -404,20 +416,70 @@ export class WorkflowRun {
 			this.emitChange();
 			return true;
 		}
-		live.reason = "stopped";
-		live.handle.abort("stopped");
+		this.abortAttempt(rec, live, "stopped");
 		return true;
 	}
 
+	/** Milliseconds since the agent's last sign of life (0 when it does not run, or waits for the human). */
+	quietMs(id: number, now = Date.now()): number {
+		const rec = this.agents[id];
+		const live = this.attempts.get(id);
+		if (!rec || !live || rec.status === "waiting" || live.reason) return 0;
+		return Math.max(0, now - live.lastActivity);
+	}
+
+	/** Start the agent again from the beginning (a new conversation). */
 	restartAgent(id: number): boolean {
 		const rec = this.agents[id];
 		if (!rec) return false;
 		const live = this.attempts.get(id);
 		if (!live || AGENT_FINAL.has(rec.status)) return false;
-		live.reason = "restart";
-		live.handle.abort("restart");
+		this.abortAttempt(rec, live, "restart");
 		this.log("info", `Restarting agent #${id} (${rec.label}).`);
 		return true;
+	}
+
+	/**
+	 * Stop the agent's current step and let it go on with its context: for a step that
+	 * hangs (a command that waits for input, a tool that does not return). `text` is an
+	 * optional message for the agent.
+	 */
+	async interruptAgent(id: number, text = "", by: "human" | "agent" = "human"): Promise<boolean> {
+		const rec = this.agents[id];
+		const live = this.attempts.get(id);
+		if (!rec || !live?.handle.interrupt || live.reason || AGENT_FINAL.has(rec.status)) return false;
+		const who = by === "human" ? "The user who watches this workflow" : "The main agent that started this workflow";
+		const message = text.trim();
+		const note = `${who} stopped your last step before it finished (it may hang).${message ? ` Message: ${message}` : " Do not repeat it in the same way."} Continue your task.`;
+		const ok = await live.handle.interrupt(note);
+		if (!ok) return false;
+		live.lastActivity = Date.now();
+		rec.interrupts = (rec.interrupts ?? 0) + 1;
+		if (message) rec.steers = [...(rec.steers ?? []), { t: Date.now(), by, text: message }];
+		this.log("info", `Agent #${id} (${rec.label}): the ${by === "human" ? "user" : "main agent"} interrupted its current step; it goes on with its context.`);
+		this.emitChange();
+		return true;
+	}
+
+	/**
+	 * Abort an attempt. A step that ignores the stop signal must not hold the run: when
+	 * the attempt has not ended after abandonMs, the run gives up on it and goes on.
+	 */
+	private abortAttempt(rec: AgentRecord, live: LiveAttempt, reason: AbortReason): void {
+		live.reason = reason;
+		live.handle.abort(reason);
+		if (live.abandonTimer) return;
+		live.abandonTimer = setTimeout(() => {
+			if (this.attempts.get(rec.id) !== live || this.isFinal) return;
+			live.abandoned = true;
+			this.log(
+				"warn",
+				`Agent #${rec.id} (${rec.label}) did not stop within ${formatDuration(this.abandonMs)}: one of its steps ignores the stop signal. The run goes on without that attempt.`,
+			);
+			const plan = this.plans.get(rec.id);
+			if (plan) this.settleAttempt(rec, plan, { ok: false, reason: "aborted", message: "the attempt did not stop and was abandoned", retryable: false }, live.reason);
+		}, this.abandonMs);
+		live.abandonTimer.unref?.();
 	}
 
 	/** Send a correction or extra instruction to a running agent. */
@@ -850,11 +912,13 @@ export class WorkflowRun {
 		const current = live;
 		this.attempts.set(rec.id, current);
 		this.emitChange();
-		handle.promise.then(
-			(outcome) => this.settleAttempt(rec, plan, outcome, current.reason),
-			(err) =>
-				this.settleAttempt(rec, plan, { ok: false, reason: "error", message: (err as Error)?.message ?? String(err), retryable: false }, current.reason),
-		);
+		const settle = (outcome: AttemptOutcome) => {
+			if (current.abandonTimer) clearTimeout(current.abandonTimer);
+			// The run already gave up on this attempt and went on.
+			if (current.abandoned) return;
+			this.settleAttempt(rec, plan, outcome, current.reason);
+		};
+		handle.promise.then(settle, (err) => settle({ ok: false, reason: "error", message: (err as Error)?.message ?? String(err), retryable: false }));
 	}
 
 	/** Check live attempts for stalls at a rate that fits the smallest stall limit. */
@@ -880,10 +944,22 @@ export class WorkflowRun {
 				live.lastActivity = now;
 				continue;
 			}
-			if (now - live.lastActivity > limit) {
-				live.reason = "stalled";
-				live.handle.abort("stalled");
+			if (now - live.lastActivity <= limit) continue;
+			rec.stalls = (rec.stalls ?? 0) + 1;
+			// First stall: stop only the hanging step; the agent keeps its context.
+			if (rec.stalls === 1 && live.handle.interrupt) {
+				live.lastActivity = now;
+				const note = `Your last step showed no activity for ${formatDuration(limit)}, so the workflow stopped it. It may hang (for example a command that waits for input). Do not run it the same way again. Continue your task.`;
+				this.log("warn", `Agent #${id} (${rec.label}) showed no activity for ${formatDuration(limit)}. Its current step was stopped; it goes on with its context.`);
+				void live.handle.interrupt(note).then((ok) => {
+					if (ok) {
+						rec.interrupts = (rec.interrupts ?? 0) + 1;
+						this.emitChange();
+					} else if (this.attempts.get(id) === live && !live.reason) this.abortAttempt(rec, live, "stalled");
+				});
+				continue;
 			}
+			this.abortAttempt(rec, live, "stalled");
 		}
 	}
 
@@ -924,10 +1000,10 @@ export class WorkflowRun {
 			const message = stalled
 				? `no activity for ${formatDuration(limit)} (stalled). An agent that runs long silent commands needs a larger stallMs.`
 				: outcome.message;
-			if (stalled) rec.stalls = (rec.stalls ?? 0) + 1;
-			// The first stall gets one extra attempt that does not count against retries.
-			const freeRetry = stalled && rec.stalls === 1;
-			const retriesLeft = plan.retries - (rec.attempts - 1 - Math.min(1, rec.stalls ?? 0));
+			// One restart after a stall is free: it does not count against retries.
+			const freeRetry = stalled && !rec.stallRestarts;
+			if (freeRetry) rec.stallRestarts = 1;
+			const retriesLeft = plan.retries - (rec.attempts - 1 - (rec.stallRestarts ?? 0));
 			if ((freeRetry || ((outcome.retryable || stalled) && retriesLeft > 0)) && !this.isFinal) {
 				this.log(
 					"warn",
@@ -992,10 +1068,7 @@ export class WorkflowRun {
 				this.journalAgent(rec);
 			} else {
 				const live = this.attempts.get(rec.id);
-				if (live) {
-					live.reason = "cancelled";
-					live.handle.abort("cancelled");
-				}
+				if (live) this.abortAttempt(rec, live, "cancelled");
 			}
 		}
 		this.emitChange();

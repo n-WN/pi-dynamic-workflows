@@ -205,6 +205,8 @@ export class PiAgentExecutor implements AgentExecutor {
 		const controller = new AbortController();
 		/** Aborts when this attempt ends for any reason: its open dialogs close. */
 		const attemptDone = new AbortController();
+		/** Set by interrupt(): the note with which the conversation goes on after the stopped step. */
+		let continueNote: string | undefined;
 		const abort = (reason: AbortReason | "max_turns" | "validation") => {
 			abortReason ??= reason;
 			controller.abort();
@@ -353,10 +355,24 @@ export class PiAgentExecutor implements AgentExecutor {
 
 				rec.activity = "thinking";
 				hooks.onChange();
-				await session.prompt(
-					worktree ? `${data.prompt}\n\n${worktreeNote(agentCwd, worktree.branch)}` : data.prompt,
-					{ expandPromptTemplates: false, source: "extension" },
-				);
+				const active = session;
+				// A prompt that goes on after interrupts: an interrupted step ends the prompt,
+				// and the same conversation continues with the note.
+				const promptThrough = async (text: string) => {
+					let next: string | undefined = text;
+					while (next !== undefined && !abortReason) {
+						const current: string = next;
+						next = undefined;
+						await active.prompt(current, { expandPromptTemplates: false, source: "extension" });
+						if (continueNote !== undefined && !abortReason) {
+							next = continueNote;
+							continueNote = undefined;
+							rec.activity = "going on after an interrupt";
+							hooks.onChange();
+						}
+					}
+				};
+				await promptThrough(worktree ? `${data.prompt}\n\n${worktreeNote(agentCwd, worktree.branch)}` : data.prompt);
 
 				if (data.schema) {
 					let reminders = 0;
@@ -364,7 +380,7 @@ export class PiAgentExecutor implements AgentExecutor {
 						reminders++;
 						rec.activity = `asking for ${SUBMIT_TOOL} (${reminders}/${ctx.structuredRetries})`;
 						hooks.onChange();
-						await session.prompt(structuredReminder(lastValidationError), { expandPromptTemplates: false, source: "extension" });
+						await promptThrough(structuredReminder(lastValidationError));
 					}
 				}
 
@@ -437,7 +453,14 @@ export class PiAgentExecutor implements AgentExecutor {
 				return false;
 			}
 		};
-		return { promise, abort: (reason) => abort(reason), steer };
+		const interrupt = async (note: string): Promise<boolean> => {
+			if (!session || abortReason || !session.isStreaming) return false;
+			continueNote = note;
+			// Do not wait: a step that ignores the signal would hold the caller.
+			void session.abort().catch(() => {});
+			return true;
+		};
+		return { promise, abort: (reason) => abort(reason), steer, interrupt };
 	}
 }
 

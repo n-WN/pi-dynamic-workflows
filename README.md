@@ -134,7 +134,8 @@ the colors of the progress bar, so they are also its legend.
 | `esc` `←` | Back. At the top: close |
 | `p` | Pause or resume the run (running agents finish; no new agents start) |
 | `x` | Stop the selected agent (the script gets `null`), or the run. Both ask first |
-| `r` | Restart the selected running agent |
+| `i` | Interrupt the selected agent's current step (a command that hangs, a tool that does not return). The agent keeps its context and goes on, with an optional message |
+| `r` | Restart the selected running agent from the beginning (a new conversation) |
 | `m` | Send a message to the selected running agent (a correction or an extra instruction; it reads it after its current step) |
 | `f` | Filter the agents of a phase: all, active, failed, done, queued |
 | `s` | Save the run's script as a command (project `.pi/workflows/` or personal `~/.pi/agent/workflows/`) |
@@ -157,6 +158,24 @@ in the monitor:
 
 When a run ends, a result card appears in the conversation and the agent continues
 with the result.
+
+### A hung agent
+
+An agent without any activity for a minute shows `quiet 4m12s` in the agent list,
+and its detail view says what you can do. The main agent sees the same in
+`workflow_control status`. Steps from light to heavy:
+
+| Step | Keeps the agent's work | How |
+|---|---|---|
+| Interrupt the step | yes: same conversation | `i` (optional message), or `workflow_control interrupt` |
+| Restart the agent | no: new conversation, same prompt | `r`, or `workflow_control restart` |
+| Stop the agent | the script gets `null`; the run goes on | `x`, or `workflow_control stop` with `agent` |
+| Stop the run, relaunch later | completed agents keep their results | `x` on the run, then `workflow({ resumeFromRunId })` |
+
+The stall watchdog does the same by itself: after `stallMinutes` (10) without any
+activity it interrupts the step, after a second stall it restarts the agent, and
+after a third the agent fails. A step that ignores the stop signal cannot hold the
+run: after 10 seconds the run gives up on that attempt and goes on.
 
 ## For the agent
 

@@ -268,7 +268,11 @@ export function statusText(run: WorkflowRun): string {
 	const running = run.agents.filter((a) => AGENT_ACTIVE.has(a.status));
 	if (running.length) {
 		lines.push("Running agents:");
-		for (const a of running.slice(0, 16)) lines.push(`- #${a.id} "${a.label}" (${a.phase}): ${oneLine(a.activity ?? "running", 120)}`);
+		for (const a of running.slice(0, 16)) {
+			const quiet = run.quietMs(a.id);
+			const hint = quiet >= 60_000 ? `, no activity for ${formatDuration(quiet)} (it may hang: interrupt, then restart)` : "";
+			lines.push(`- #${a.id} "${a.label}" (${a.phase}): ${oneLine(a.activity ?? "running", 120)}${hint}`);
+		}
 	}
 	const failed = run.agents.filter((a) => a.status === "failed");
 	if (failed.length) {

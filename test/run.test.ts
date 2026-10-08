@@ -91,6 +91,7 @@ function makeRun(source: string, executor: AgentExecutor, extra: Partial<Constru
 }
 
 const META = `export const meta = { name: "t", description: "test" }\n`;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function finished(run: WorkflowRun): Promise<WorkflowRun> {
 	run.start();
@@ -487,4 +488,118 @@ test("token budget: no question when the script needs no new agent", async () =>
 	assert.equal(run.status, "completed");
 	assert.equal(asked, 0);
 	assert.equal(run.usage.totalTokens, 300);
+});
+
+// ---------------------------------------------------------------------------
+// Hung agents: stop, restart, interrupt, stall escalation
+// ---------------------------------------------------------------------------
+
+/** The first `hangs` attempts of the "stuck" agent hang in a step that ignores the stop signal. */
+class StuckExecutor extends FakeExecutor {
+	hangs: number;
+	constructor(hangs = 1) {
+		super(() => ({}));
+		this.hangs = hangs;
+	}
+	start(run: WorkflowRun, rec: AgentRecord, plan: AgentPlan, hooks: AttemptHooks): AttemptHandle {
+		if (rec.prompt !== "stuck" || rec.attempts > this.hangs) return super.start(run, rec, plan, hooks);
+		this.started.push(rec);
+		return { promise: new Promise<AttemptOutcome>(() => {}), abort: () => {} };
+	}
+}
+
+/** An agent that can be interrupted: the attempt then ends with the note it got. */
+class InterruptibleExecutor extends FakeExecutor {
+	notes: string[] = [];
+	/** Stay silent after an interrupt (a step that hangs again). */
+	silent: boolean;
+	constructor(silent = false) {
+		super(() => ({ delay: 60_000 }));
+		this.silent = silent;
+	}
+	start(run: WorkflowRun, rec: AgentRecord, plan: AgentPlan, hooks: AttemptHooks): AttemptHandle {
+		const h = super.start(run, rec, plan, hooks);
+		let finish!: (o: AttemptOutcome) => void;
+		const promise = new Promise<AttemptOutcome>((r) => {
+			finish = r;
+			void h.promise.then(r);
+		});
+		return {
+			promise,
+			abort: (reason) => h.abort(reason),
+			interrupt: async (note) => {
+				this.notes.push(note);
+				if (!this.silent) setTimeout(() => finish({ ok: true, value: `went on: ${note.slice(0, 40)}` }), 20);
+				return true;
+			},
+		};
+	}
+}
+
+const HUNG = `${META}return await parallel([() => agent("ok"), () => agent("stuck")])`;
+
+test("a hung agent that ignores the stop signal: stop gives up on it after abandonMs", async () => {
+	const run = makeRun(HUNG, new StuckExecutor(), { abandonMs: 150 });
+	run.start();
+	await sleep(80);
+	assert.equal(run.stopAgent(1), true);
+	await run.whenEnded();
+	assert.equal(run.status, "completed");
+	assert.deepEqual(run.result, ["ok:ok", null]);
+	assert.equal(run.agents[1].status, "stopped");
+	assert.ok(run.logs.some((l) => l.text.includes("did not stop within")));
+});
+
+test("a hung agent: restart gives up on the stuck attempt and starts a new one", async () => {
+	const ex = new StuckExecutor(1);
+	const run = makeRun(HUNG, ex, { abandonMs: 150 });
+	run.start();
+	await sleep(80);
+	assert.equal(run.restartAgent(1), true);
+	await run.whenEnded();
+	assert.deepEqual(run.result, ["ok:ok", "ok:stuck"]);
+	assert.equal(run.agents[1].attempts, 2);
+});
+
+test("a stall in a step that ignores the stop signal: abandoned, then one free restart", async () => {
+	const run = await finished(makeRun(HUNG, new StuckExecutor(1), { stallMs: 100, abandonMs: 150 }));
+	assert.deepEqual(run.result, ["ok:ok", "ok:stuck"]);
+	assert.equal(run.agents[1].attempts, 2);
+	assert.equal(run.agents[1].stalls, 1);
+});
+
+test("interrupt: the agent goes on with its context and the message", async () => {
+	const ex = new InterruptibleExecutor();
+	const run = makeRun(`${META}return await agent("long task")`, ex);
+	run.start();
+	await sleep(50);
+	assert.equal(await run.interruptAgent(0, "skip the slow test"), true);
+	await run.whenEnded();
+	assert.equal(run.agents[0].attempts, 1, "same attempt, same conversation");
+	assert.equal(run.agents[0].interrupts, 1);
+	assert.match(ex.notes[0], /stopped your last step.*Message: skip the slow test/);
+	assert.equal(run.agents[0].steers?.[0].text, "skip the slow test");
+	assert.match(String(run.result), /^went on: /);
+});
+
+test("stall escalation: interrupt in place, then a fresh restart, then failure", async () => {
+	const ex = new InterruptibleExecutor(true);
+	const run = await finished(makeRun(`${META}return await agent("always quiet")`, ex, { stallMs: 100 }));
+	const rec = run.agents[0];
+	assert.equal(run.result, null);
+	assert.equal(rec.status, "failed");
+	assert.equal(rec.stalls, 3);
+	assert.equal(ex.notes.length, 1, "the first stall interrupts the step");
+	assert.equal(rec.attempts, 2, "the second stall restarts once");
+	assert.match(rec.error ?? "", /stalled/);
+});
+
+test("quietMs: time since the last sign of life of a running agent", async () => {
+	const run = makeRun(`${META}return await agent("x")`, new FakeExecutor(() => ({ delay: 300 })));
+	run.start();
+	await sleep(150);
+	const quiet = run.quietMs(0);
+	assert.ok(quiet >= 100 && quiet < 300, `quiet ${quiet}`);
+	await run.whenEnded();
+	assert.equal(run.quietMs(0), 0);
 });
